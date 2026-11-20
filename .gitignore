@@ -1,2 +1,21 @@
 /ref/
-/plan/
+/build/
+/.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# 本地上游目录配置（模板见 `config.example.yml`）。
+/config.yml
+
+# 本地草稿。
+/docs/planning/
+
+# `data/` 下只有 `knowledge/` 入库。
+# `upstream/` 由 `bg data sync` 重建，`stats/` 由 `bg data ingest` 与 `bg data loot` 重建。
+/data/upstream/
+/data/stats/
+
+# 共用解析层的 junction 挂载点：物理副本在 RecipeAnalysis 侧各有一份，
+# 这里不重复提交。
+src/*/mcshared/

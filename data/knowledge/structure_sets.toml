@@ -1,0 +1,220 @@
+# 战利品表 → 结构集合。
+#
+# 上游来源索引按战利品表路径区分来源（chests/village/village_toolsmith），
+# 而世界统计按结构集合测量（minecraft:villages）。这两套标识必须显式对齐，
+# 否则「村庄箱子」这条来源查不到村庄的间距统计，只能默默回退到全局值。
+#
+# 匹配方式是最长前缀：表路径去掉命名空间后与键比较。
+# 没有列出的表路径不猜集合：该来源会在缺口报告里列为「未映射」。
+#
+# 只收真正由结构集合测量的表。piglin_bartering、fishing、spawn_bonus_chest
+# 这类不是结构，故意不映射。
+
+# 这些结构集合位于地下，槽位路线据此判定（比按表名猜更可靠）。
+underground_sets = [
+  "minecraft:mineshafts",
+  "minecraft:strongholds",
+  "minecraft:trial_chambers",
+  "minecraft:ancient_cities",
+  # 地牢是 feature 不是 jigsaw 结构，没有 `structure_density`，
+  # 只能按搜搜索代价估（体积占比法）。
+  "minecraft:monster_rooms",
+]
+
+[loot_prefixes]
+"chests/village/" = "minecraft:villages"
+"chests/abandoned_mineshaft" = "minecraft:mineshafts"
+"chests/stronghold_" = "minecraft:strongholds"
+"chests/trial_chambers/" = "minecraft:trial_chambers"
+"pots/trial_chambers/" = "minecraft:trial_chambers"
+"dispensers/trial_chambers/" = "minecraft:trial_chambers"
+"spawners/trial_chamber" = "minecraft:trial_chambers"
+"spawners/ominous/trial_chamber" = "minecraft:trial_chambers"
+"equipment/trial_chamber" = "minecraft:trial_chambers"
+"chests/ancient_city" = "minecraft:ancient_cities"
+"chests/woodland_mansion" = "minecraft:woodland_mansions"
+"chests/desert_pyramid" = "minecraft:desert_pyramids"
+"chests/jungle_temple" = "minecraft:jungle_temples"
+"chests/igloo_chest" = "minecraft:igloos"
+"chests/shipwreck" = "minecraft:shipwrecks"
+"chests/bastion_" = "minecraft:nether_complexes"
+"chests/nether_bridge" = "minecraft:nether_complexes"
+"chests/end_city_treasure" = "minecraft:end_cities"
+# 地牢没有 `structure_density`，这个集合名只用来接住表名与汇总箱数，
+# 到达成本走 `structure_search_cost` 的体积占比。
+"chests/simple_dungeon" = "minecraft:monster_rooms"
+"chests/underwater_ruin" = "minecraft:ocean_ruins"
+"chests/ruined_portal" = "minecraft:ruined_portals"
+"chests/buried_treasure" = "minecraft:buried_treasures"
+"chests/ocean_monument" = "minecraft:ocean_monuments"
+"chests/pillager_outpost" = "minecraft:pillager_outposts"
+"chests/swamp_hut" = "minecraft:swamp_huts"
+"chests/abandoned_camp" = "minecraft:abandoned_camp"
+"barrels/abandoned_camp" = "minecraft:abandoned_camp"
+
+# 考古点（可疑方块）。表路径写成 archaeology/<点名>，点名与结构名不一定相同，
+# 必须逐条列：trail_ruins_common / trail_ruins_rare 都属于同一个结构集合。
+"archaeology/trail_ruins" = "minecraft:trail_ruins"
+"archaeology/ocean_ruin" = "minecraft:ocean_ruins"
+"archaeology/desert_pyramid" = "minecraft:desert_pyramids"
+# 沙漠水井是 placed feature，不是 jigsaw 结构：采集侧把它作为
+# `source=feature` 的集合测量（`structure_density` / `structure_content`
+# 都有），所以这里能接上真实的最近距离，不是回退估计。
+"archaeology/desert_well" = "minecraft:desert_wells"
+
+# 结构模板路径 → 结构集合。
+#
+# 用途与 loot_prefixes 不同：loot_prefixes 把「箱子表」对齐到结构集合，
+# 这里把「方块被哪个结构放置」对齐到结构集合。一个方块若只由模板放置、
+# 没有任何世界生成特性，它的获取路线就该按结构走，不该按表所在的目录猜。
+#
+# 键是 `structure/` 之后的路径前缀（上游模板路径形如
+# `data/minecraft/structure/village/savanna/houses/x.snbt`）。
+[template_prefixes]
+"village/" = "minecraft:villages"
+
+"ancient_city/" = "minecraft:ancient_cities"
+"trial_chambers/" = "minecraft:trial_chambers"
+"trail_ruins/" = "minecraft:trail_ruins"
+"woodland_mansion/" = "minecraft:woodland_mansions"
+"bastion/" = "minecraft:bastion"
+"end_city/" = "minecraft:end_cities"
+"igloo/" = "minecraft:igloos"
+"ruined_portal/" = "minecraft:ruined_portals"
+"underwater_ruin/" = "minecraft:ocean_ruins"
+"pillager_outpost/" = "minecraft:pillager_outposts"
+"shipwreck/" = "minecraft:shipwrecks"
+"desert_well/" = "minecraft:desert_wells"
+"abandoned_camp/" = "minecraft:abandoned_camp"
+"fossil/" = "minecraft:fossils"
+"monument/" = "minecraft:ocean_monuments"
+"fortress/" = "minecraft:fortresses"
+"swamp_hut/" = "minecraft:swamp_huts"
+"mineshaft/" = "minecraft:mineshafts"
+"stronghold/" = "minecraft:strongholds"
+"ocean_ruin/" = "minecraft:ocean_ruins"
+"mansion/" = "minecraft:woodland_mansions"
+
+# 结构集合 → 它的具体变体。
+#
+# `structure_density` 按集合测量（`minecraft:villages`），而
+# `structure_content` 按变体测量（`minecraft:village_plains` 每处 2.30 个箱）。
+# 「一趟能开几个箱」要按变体取平均，所以两张表必须能对上。
+#
+# 不按名字猜：`jungle_pyramid` 属于 `jungle_temples`、`mansion` 属于
+# `woodland_mansions`，猜不出来。逐条列出。
+#
+# 没列进来的变体（`minecraft:monster_room`）在上游没有集合级密度，
+# 只能按搜索代价单独估，不走「每处箱数」这条。
+#
+# `minecraft:pillager_outpost` 原本也在这张名单里，但上游后来补了
+# `structure_density[minecraft:pillager_outposts]`（与 `structure_content` 里的
+# 单数变体名不同），所以现在能走「跑一趟」了。
+[structure_members]
+"minecraft:abandoned_camp" = [
+  "minecraft:abandoned_camp_bamboo_jungle",
+  "minecraft:abandoned_camp_birch_forest",
+  "minecraft:abandoned_camp_cherry_grove",
+  "minecraft:abandoned_camp_dappled_forest",
+  "minecraft:abandoned_camp_flower_forest",
+  "minecraft:abandoned_camp_forest",
+  "minecraft:abandoned_camp_meadow",
+  "minecraft:abandoned_camp_old_growth_birch_forest",
+  "minecraft:abandoned_camp_old_growth_pine_taiga",
+  "minecraft:abandoned_camp_old_growth_spruce_taiga",
+  "minecraft:abandoned_camp_pale_garden",
+  "minecraft:abandoned_camp_savanna",
+  "minecraft:abandoned_camp_snowy_taiga",
+  "minecraft:abandoned_camp_sparse_jungle",
+  "minecraft:abandoned_camp_swamp",
+  "minecraft:abandoned_camp_taiga",
+  "minecraft:abandoned_camp_windswept_forest",
+  "minecraft:abandoned_camp_wooded_badlands",
+]
+"minecraft:ancient_cities" = ["minecraft:ancient_city"]
+"minecraft:buried_treasures" = ["minecraft:buried_treasure"]
+"minecraft:desert_pyramids" = ["minecraft:desert_pyramid"]
+# 沙漠水井不是 jigsaw 结构：它由 placed_feature 放置，没有 structure start。
+# 采集侧把可疑方块聚类成实例，以变体名 `minecraft:desert_well` 写入
+# `structure_content`，集合名与 template_prefixes 的 `desert_well/` 一致。
+"minecraft:desert_wells" = ["minecraft:desert_well"]
+"minecraft:end_cities" = ["minecraft:end_city"]
+"minecraft:igloos" = ["minecraft:igloo"]
+"minecraft:jungle_temples" = ["minecraft:jungle_pyramid"]
+"minecraft:mineshafts" = ["minecraft:mineshaft", "minecraft:mineshaft_mesa"]
+"minecraft:nether_complexes" = ["minecraft:fortress", "minecraft:bastion_remnant"]
+"minecraft:nether_fossils" = ["minecraft:nether_fossil"]
+"minecraft:ocean_monuments" = ["minecraft:monument"]
+"minecraft:ocean_ruins" = ["minecraft:ocean_ruin_cold", "minecraft:ocean_ruin_warm"]
+"minecraft:pillager_outposts" = ["minecraft:pillager_outpost"]
+"minecraft:ruined_portals" = [
+  "minecraft:ruined_portal",
+  "minecraft:ruined_portal_desert",
+  "minecraft:ruined_portal_jungle",
+  "minecraft:ruined_portal_mountain",
+  "minecraft:ruined_portal_nether",
+  "minecraft:ruined_portal_ocean",
+]
+"minecraft:shipwrecks" = ["minecraft:shipwreck", "minecraft:shipwreck_beached"]
+"minecraft:strongholds" = ["minecraft:stronghold"]
+"minecraft:monster_rooms" = ["minecraft:monster_room"]
+"minecraft:swamp_huts" = ["minecraft:swamp_hut"]
+"minecraft:trail_ruins" = ["minecraft:trail_ruins"]
+"minecraft:trial_chambers" = ["minecraft:trial_chambers"]
+"minecraft:villages" = [
+  "minecraft:village_desert",
+  "minecraft:village_plains",
+  "minecraft:village_savanna",
+  "minecraft:village_snowy",
+  "minecraft:village_taiga",
+]
+"minecraft:woodland_mansions" = ["minecraft:mansion"]
+
+# 没有包围盒的结构（地牢）的每处占地体积（格³）。
+#
+# `structure_content` 的 `volume_per_start` 来自包围盒，地牢没有 BB 所以为空。
+# 搜搜索代价必须知道这个数（体积占比法的分母），所以单列：
+# 9×9×9 的方形房间是版本事实，不是测量值。
+[feature_volumes]
+"minecraft:monster_rooms" = 729.0
+
+# 结构集合 → 指向它的藏宝图物品。
+#
+# 「知道位置」在模型里一直是被白送的前提：`nearest_distance` 等于「玩家已经
+# 知道最近一处在哪」。实际上宝藏类结构要靠地图才能定位，而地图本身要跑一趟
+# 沉船或海底废墟去拿。所以这张表登记「哪个集合靠哪张图定位」，
+# 下游把它作为「跑一趟」的 `per_use` 前置（每趟消耗 1 张）。
+#
+# 键不能靠拼接推出来：命名没有统一规则（`buried_ancient_city_map` 带了
+# `buried_` 前缀，`warm_ocean_ruins_map` 把 warm 放到了前面），逐条列。
+[structure_maps]
+"minecraft:buried_treasures" = "minecraft:buried_treasure_map"
+"minecraft:ancient_cities" = "minecraft:buried_ancient_city_map"
+"minecraft:mineshafts" = "minecraft:buried_mineshaft_map"
+"minecraft:trial_chambers" = "minecraft:buried_trial_chambers_map"
+"minecraft:desert_pyramids" = "minecraft:desert_pyramid_map"
+"minecraft:jungle_temples" = "minecraft:jungle_pyramid_map"
+"minecraft:woodland_mansions" = "minecraft:woodland_mansion_map"
+# 海底废墟**不登记**：`warm_ocean_ruins_map` 本身就由废墟的箱子产出，
+# 登记上去会让「去废墟」依赖「去废墟拿的图」，整条路自锁。沉船同理
+# （`shipwreck_map` 是它的产出），不在这里是因为它本来就不是地图的目标。
+
+# 结构顶层的 y（版本事实，不是测量值）。
+#
+# 地下结构不能「瞬间到达」：`ctx.travel` 只算跑图，不含从地表往下挖。
+# 世界统计产物里没有结构的 y 坐标（`structure-interior` 只有区块数与件数），
+# 所以这一列只能按版本已知的生成高度登记。
+#
+# 登记的是**顶层**而不是平均层：玩家挖到结构顶部就进得去，不需要挖到中心。
+# 没登记的结构不会假装「零成本到达」，而是把「未含竖井」写进假设，
+# 让偏乐观的路线自己露出来。
+[structure_depths]
+# 深暗之域的古代城市整座在 -51。
+"minecraft:ancient_cities" = -51.0
+# 1.18 起主世界要塞固定在 y=32 附近。
+"minecraft:strongholds" = 32.0
+# 地牢锚点分布很宽（旧案例取 30 作为代表层）。
+"minecraft:monster_rooms" = 30.0
+# 试炼大厅在 -40 到 -20 之间起建，正门层取 -20。
+"minecraft:trial_chambers" = -20.0
+

@@ -1,0 +1,88 @@
+# 路线知识表：地下集合、其他维度、结构归属。
+#
+# 上游按存在性语义求解，不区分维度与层位，所以「在哪拿」由本表判定。
+# 未命中任何条目一律按主世界地表处理。这张表只影响槽位的路线归属，
+# 不影响可达性与代价。
+
+# 名字前缀命中即算地下，用于覆盖整族方块（深板岩变体、监守者相关方块）。
+underground_block_prefixes = [
+  "minecraft:deepslate_",
+  "minecraft:sculk",
+  "minecraft:cave_vines",
+  "minecraft:glow_lichen",
+]
+
+underground_blocks = [
+  "minecraft:redstone_ore",
+  "minecraft:diamond_ore",
+  "minecraft:lapis_ore",
+  "minecraft:emerald_ore",
+  "minecraft:ancient_debris",
+]
+
+# 结构或考古点的表路径前缀。表名第二级之后就是结构名。
+underground_structure_prefixes = [
+  "minecraft:chests/abandoned_mineshaft",
+  "minecraft:chests/simple_dungeon",
+  "minecraft:chests/stronghold_",
+  "minecraft:chests/trial_chambers/",
+  "minecraft:chests/ancient_city",
+  "minecraft:chests/monster_room",
+  "minecraft:pots/trial_chambers/",
+  "minecraft:archaeology/trail_ruins",
+]
+
+# 名字里含这些子串即算下界或末地。按表内顺序匹配，先命中者优先。
+# 不用 `end_` 这种宽前缀：`ender_pearl` 会被误判成末地；
+# 也不用 `ender`：末影人在主世界与末地都生成。
+# 必须排在所有顶层键之后：TOML 的键值对归最近的表头。
+[dimension_keywords]
+"the_nether" = [
+  "minecraft:nether_",
+  "minecraft:crimson_",
+  "minecraft:warped_",
+  "minecraft:ancient_debris",
+  "minecraft:gilded_blackstone",
+  "minecraft:basalt",
+  "minecraft:blackstone",
+  "minecraft:soul_sand",
+  "minecraft:soul_soil",
+  "minecraft:magma",
+  "minecraft:glowstone",
+  "minecraft:quartz",
+  "minecraft:blaze",
+  "minecraft:ghast",
+  "minecraft:hoglin",
+  "minecraft:piglin",
+  "minecraft:strider",
+  "minecraft:wither_skeleton",
+  "minecraft:zombified_piglin",
+  "minecraft:chests/bastion",
+  "minecraft:chests/nether_bridge",
+  "minecraft:fortress",
+]
+"the_end" = [
+  "minecraft:end_stone",
+  "minecraft:end_city",
+  "minecraft:chorus_",
+  "minecraft:shulker_",
+  "minecraft:purpur_",
+  "minecraft:dragon_",
+  "minecraft:elytra",
+  # 实体与变体：`shulker` 本身不带下划线，`ender_dragon` 不带 `dragon_`。
+  # 这两条以前漏了，导致潜影贝与末影龙被当成主世界地表来源。
+  "minecraft:shulker",
+  "minecraft:ender_dragon",
+]
+
+# 结构 → 维度。前置里出现该结构即判为对应维度。
+# 比关键词可靠：结构有明确的维度归属，而实体名不一定能看出维度。
+# 例：`entity:minecraft:shulker <- structure:minecraft:end_city`。
+[structure_dimensions]
+"minecraft:end_city" = "minecraft:the_end"
+"minecraft:end_cities" = "minecraft:the_end"
+"minecraft:fortress" = "minecraft:the_nether"
+"minecraft:fortresses" = "minecraft:the_nether"
+"minecraft:bastion" = "minecraft:the_nether"
+"minecraft:bastion_remnant" = "minecraft:the_nether"
+"minecraft:nether_fossil" = "minecraft:the_nether"

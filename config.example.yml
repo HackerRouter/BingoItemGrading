@@ -1,0 +1,23 @@
+# config.yml —— 两个上游项目的位置
+#
+# 复制本文件为 `config.yml`（不入库），把两项改成实际目录。
+# 两项都是**必填**，没有默认值：缺文件、缺项、空值都会在读配置时报错并退出。
+#
+# 本仓库自己的目录（data/、build/ 及其子树）固定在 src/bingo_grading/paths.py 的常量区，
+# 不在这里配。
+#
+# 这两项只在 `bg data sync` / `bg data verify` 里使用：运行态（index / grade / plan）
+# 只读已同步到 data/ 的快照，不会回退到这里的目录。
+#
+# 查找顺序：环境变量 `BG_CONFIG` → 当前工作目录 → 仓库根。
+# 相对路径按本文件所在目录解析；也接受绝对路径与 `~`。
+#
+# 值一律用**单引号**包起来：YAML 的单引号不做转义，Windows 路径里的反斜杠可以
+# 原样写。双引号会把 `\g`、`\R` 当非法转义而报错，所以别用双引号。
+
+paths:
+  # RecipeAnalysis 仓库根：其下应有 output/<pack>/、inputs/<pack>/、facts/、knowledge/
+  recipe_analysis: '/path/to/RecipeAnalysis'
+
+  # WorldGenStatsCollector 仓库根：其下应有 stats/<run>/（以及与上游一致时的 .server/）
+  collector: '/path/to/WorldGenStatsCollector'
