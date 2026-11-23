@@ -85,6 +85,10 @@ ATOMIC_PREFIXES = (
     "shear:",
 )
 
+# 尾部成本的分位系数：正态单侧 95%。与 `plan.supply.Curve.tail_cost` 的默认值
+# 同一个口径，改的时候两处一起改（那里是批量曲线，这里是整次调用）。
+TAIL_Z = 1.645
+
 
 def best_whole_cost(
     actionset,
@@ -95,7 +99,7 @@ def best_whole_cost(
     seen: frozenset[str] = frozenset(),
     memo: dict | None = None,
     actions_by_id: dict | None = None,
-) -> tuple[float | None, str, str]:
+) -> tuple[float | None, str, str, float]:
     """按**整次调用**口径，递归取「凑够 `demand` 件」最便宜的方案。
 
     为什么不能直接用 `plan.cost`：引擎的曲线是连续松弛（可以调用 0.3 次），
@@ -119,7 +123,15 @@ def best_whole_cost(
     `curves` 是全部物品的供给曲线（`solved.curves`）。`seen` 防环：
     递归回到当前链路已经出现过的物品时，该分支判为不可行。
 
-    返回 `(成本, 动作 id, 说明)`；没有可用方案时成本为 `None`。
+    返回 `(成本, 动作 id, 说明, 成本方差)`；没有可用方案时成本为 `None`。
+
+    方差与成本**同步累加**，所以时两者同口径（都是整次调用），可以直接想
+    `p95 = cost + z·sd`。方差只来自「单次产出的件数波动」：
+
+        Var = Σ calls·(单次成本·产出 cv)²           # 本动作
+            + Σ 前置方案的方差                     # 递归（once 只算一次）
+
+    固成本（`overhead`）与未标 `yield_cv` 的动作当作确定量，方差贡献为 0。
 
     **已知局限**：候选段来自引擎按均摊口径做的 Pareto 剪枝，所以被剪掉、
     但在整次口径下更便宜的来源不参与比较。结果偏保守（高估）。
@@ -138,8 +150,9 @@ def best_whole_cost(
         return memo[key]
     if item in seen:
         # 回到当前链路已经走过的物品：这条分支是环，无法给出有限成本。
-        return (None, "", "")
+        return (None, "", "", 0.0)
     best: float | None = None
+    best_var = 0.0
     best_action = ""
     best_label = ""
     curve = curves.get(item)
@@ -151,9 +164,16 @@ def best_whole_cost(
     for segment in curve.segments if curve else ():
         if segment.members:
             # 并行合成的段：产出无法归到单个动作上，退回线性计价。
+            # cv 已在 `merge_race` 里按速率合成过，直接用段的自己的。
             total = segment.fixed_cost + segment.unit_cost * demand
+            spread = demand * (segment.unit_cost * segment.cv) ** 2
             if best is None or total < best:
-                best, best_action, best_label = total, segment.action_id, segment.label
+                best, best_var, best_action, best_label = (
+                    total,
+                    spread,
+                    segment.action_id,
+                    segment.label,
+                )
             continue
         action = by_id.get(segment.action_id)
         if action is None:
@@ -169,11 +189,24 @@ def best_whole_cost(
         else:
             calls = demand / effective
         total = sum(amount for _, amount in action.overhead) + action.cost * calls
+        # 方差按**每件成本**换算：`cv` 描述的是「每件成本的相对波动」，已经含了
+        # 1/μ 的折减（`cv = (s/μ)·√μ`）。所以：
+        #
+        #     Var(n 件) = n · (单次成本 · cv / 单次产出)²
+        #
+        # 不能写成 `calls · (cost · cv)²`：`calls` 是**整次口径取整后**的次数，
+        # 而 `cv` 是按连续松弛定的，两者一乘就把「一趟村庄给 22 个金粒」的方差
+        # 放大 μ² 倍（实测 p95 从 1.17 倍虚到 7 倍）。
+        #
+        # 只取主产物的 `yield_cv`：一条动作顺带产出的其它物品（开一箱拿到五样）
+        # 波动各不相同，套主产物那份数会把它们算成 sd 比均值还大。
+        cv = action.yield_cv if item == action.item else 0.0
+        spread = demand * (action.cost * cv / effective) ** 2
         for requirement in action.requires:
             need = requirement.qty * calls if requirement.mode == MODE_PER_USE else (
                 requirement.qty
             )
-            sub, _, _ = best_whole_cost(
+            sub, _, _, sub_var = best_whole_cost(
                 actionset,
                 curves,
                 requirement.item,
@@ -186,17 +219,24 @@ def best_whole_cost(
                 total = None
                 break
             total += sub
+            # 前置的波动也会传下来（独立随机变量，方差可加）。
+            spread += sub_var
         if total is None:
             continue
         if best is None or total < best:
-            best, best_action, best_label = total, segment.action_id, segment.label
+            best, best_var, best_action, best_label = (
+                total,
+                spread,
+                segment.action_id,
+                segment.label,
+            )
     if best is None:
         # **不能缓存 None**：它往往是「递归撞上 `seen` 里的物品、这条分支被判成环」
         # 的产物，只对当前这条链路成立。缓存后别的调用会命中它，把本来走得通的
         # 路线误判为不可行——实测凋灵之星的整次成本就是这么变成 `None` 的：
         # 先算灵魂沙时缓存了某个「带自己 seen」的失败，再算凋灵骷髅就复用了它。
-        return (None, "", "")
-    memo[key] = (best, best_action, best_label)
+        return (None, "", "", 0.0)
+    memo[key] = (best, best_action, best_label, best_var)
     return memo[key]
 
 
@@ -367,6 +407,7 @@ class DifficultyRow:
     """一件物品的难度评分，以及这个评分的可信度。"""
 
     item: str
+    # 最终分数：`max(成本分, 尾部分)`。两个维度并列输出，不合并成一个连续值。
     score: int | None
     tier: int | None
     cost_tu: float | None
@@ -378,6 +419,13 @@ class DifficultyRow:
     uncovered_own: int
     segments: int
     confidence: str
+    # 尾部口径：`whole_cost_tu + TAIL_Z · sd`。`None` = 拿不到方差（所有来源都
+    # 没标 `yield_cv`）或不可行；与 `whole_cost_tu` 同口径，两者可直接比。
+    p95_cost_tu: float | None = None
+    # 两个维度的分数：`cost_score` 只看平均成本，`tail_score` 只看 p95。
+    # `score` 取两者最大值；这里留存原始值，否则看不出分数是被尾部抬上去的。
+    cost_score: int | None = None
+    tail_score: int | None = None
     notes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
@@ -398,15 +446,32 @@ class DifficultyRow:
             "uncovered_own": self.uncovered_own,
             "segments": self.segments,
             "confidence": self.confidence,
+            "p95_cost_tu": (
+                None if self.p95_cost_tu is None else round(self.p95_cost_tu, 4)
+            ),
+            "cost_score": self.cost_score,
+            "tail_score": self.tail_score,
             "notes": list(self.notes),
         }
 
 
 def own_gaps(item: str, uncovered: dict[str, int]) -> int:
-    """只数**目标物品自己**的缺口：`原因:对象` 里的对象等于目标物品。
+    """只数**目标物品自己**的缺口。
 
-    不带物品名的缺口（例如「缺每处箱数:minecraft:villages」）不算——那是图的
-    质量问题，不是这件物品的路断了。
+    键的格式约定（2026-11-22 统一）：
+
+    | 形态 | 含义 | 计入本函数 |
+    |---|---|---|
+    | `原因:item` | 物品级缺口，`item` 就是缺的那件 | ✅ |
+    | `原因(subject):item` | 物品级缺口，括号里是主体（结构/生物/表） | ✅ |
+    | `原因:subject` | **结构级**缺口，影响一整类物品，不归到某一件 | ❌ |
+
+    `partition(":")` 只切第一个冒号，所以前两种取到的正好是 `item`
+    （`item` 自己带冒号无妨）。**括号里的主体必须是短名、不能含冒号**——
+    写成 `[minecraft:cow]` 会把第一个冒号切在括号里，取到的就不是物品名了。
+
+    结构级的例子：`缺结构密度:minecraft:ancient_city`——那是「古代城市缺密度数据」，
+    会让该结构下的所有物品都少一条来源，记到某一物品头上反而是错的。
     """
     total = 0
     for reason, count in uncovered.items():
@@ -452,20 +517,36 @@ def row_of(
     uncovered: dict[str, int],
     segments: int,
     demand: float = 1.0,
+    variance: float = 0.0,
 ) -> DifficultyRow:
     """把一次求解结果整理成一行难度。
 
     `score` 用 `whole_cost`（整次调用）而不是引擎的 `cost`（连续松弛）：
     难度问的是「凑够 `demand` 件要多久」。`demand = 1` 时两者差别最大，
     `demand` 很大时向均摊收敛（差一个 `1 - 1/calls` 量级）。
+
+    `variance` 是同一个方案的**成本方差**（由 `best_whole_cost` 同步累加）。
+    它只用来算并列的 `p95_cost_tu` 与 `tail_score`，不影响两个维度各自的定义：
+    `cost_score` 只看均值、`tail_score` 只看 p95，最终 `score = max(两者)`。
     """
     own = own_gaps(item, uncovered)
     notes: list[str] = []
+    p95: float | None = None
+    cost_score: int | None = None
+    tail_score: int | None = None
     if not feasible or whole_cost is None:
         notes.append("算不出可行路线：来源全部缺失或前置不可达")
     else:
-        if units.score_from_cost(whole_cost) >= units.SCORE_MAX:
+        cost_score = units.score_from_cost(whole_cost)
+        # 正态单侧 95%；没有方差信息时退化成均值本身。
+        p95 = whole_cost + TAIL_Z * math.sqrt(max(0.0, variance))
+        tail_score = units.score_from_cost(p95)
+        if cost_score >= units.SCORE_MAX:
             notes.append("分数已封顶，实际可能更难")
+        elif tail_score > cost_score:
+            notes.append(
+                f"分数按尾部计：均摊 {whole_cost:.2f} TU → p95 {p95:.2f} TU"
+            )
         if segments <= LOW_SEGMENT_COUNT:
             notes.append("只有一条来源，该来源一旦有误整件都会错")
         if cost is not None and whole_cost > cost * 1.5:
@@ -474,14 +555,20 @@ def row_of(
             )
     if own:
         notes.append(f"该物品自己还有 {own} 条来源没接进模型")
+    final_score = (
+        None
+        if cost_score is None
+        else max(cost_score, cost_score if tail_score is None else tail_score)
+    )
+    # `tier` 跟分数同源：分数是按哪个成本抬上去的，档位就按哪个成本算。
+    # 两个刻度不同（`TIER_BOUNDS` vs `SCORE_FLOOR/STEP`），不能各自取 max 混搭。
+    tier_cost = whole_cost
+    if tail_score is not None and cost_score is not None and tail_score > cost_score:
+        tier_cost = p95
     return DifficultyRow(
         item=item,
-        score=None
-        if not feasible or whole_cost is None
-        else units.score_from_cost(whole_cost),
-        tier=None
-        if not feasible or whole_cost is None
-        else units.tier_of(whole_cost),
+        score=final_score,
+        tier=None if tier_cost is None else units.tier_of(tier_cost),
         cost_tu=None if not feasible or cost is None else cost,
         whole_cost_tu=None if not feasible or whole_cost is None else whole_cost,
         route=route,
@@ -493,6 +580,9 @@ def row_of(
         confidence=confidence_of(
             feasible=feasible, uncovered_own=own, segments=segments
         ),
+        p95_cost_tu=p95,
+        cost_score=cost_score,
+        tail_score=tail_score,
         notes=tuple(notes),
     )
 
@@ -525,13 +615,23 @@ def summarize(rows: list[DifficultyRow]) -> dict:
 
 def render_table(rows: list[DifficultyRow]) -> str:
     """对齐的文本表。列宽按内容算，不手抄空格数。"""
-    header = ("物品", "分数", "档", "整次 TU", "均摊 TU", "可信度", "主要路线")
+    header = (
+        "物品",
+        "分数",
+        "档",
+        "整次 TU",
+        "尾部 TU",
+        "均摊 TU",
+        "可信度",
+        "主要路线",
+    )
     body = [
         (
             row.item,
             "-" if row.score is None else str(row.score),
             "-" if row.tier is None else str(row.tier),
             "-" if row.whole_cost_tu is None else f"{row.whole_cost_tu:.2f}",
+            "-" if row.p95_cost_tu is None else f"{row.p95_cost_tu:.2f}",
             "-" if row.cost_tu is None else f"{row.cost_tu:.2f}",
             row.confidence,
             row.route,
@@ -560,8 +660,8 @@ def render_markdown(rows: list[DifficultyRow]) -> str:
     `route_label` 里的配方路径很长，截在第一个「（」之前。
     """
     lines = [
-        "| 物品 | 分数 | 档 | 整次 TU | 均摊 TU | 可信度 | 主要路线 | 说明 |",
-        "|---|---:|---:|---:|---:|---|---|---|",
+        "| 物品 | 分数 | 档 | 整次 TU | 尾部 TU | 均摊 TU | 可信度 | 主要路线 | 说明 |",
+        "|---|---:|---:|---:|---:|---:|---|---|---|",
     ]
     for row in rows:
         # 去掉「（…参数…）」尾巴，并把多余空白压成一个空格。
@@ -574,6 +674,7 @@ def render_markdown(rows: list[DifficultyRow]) -> str:
                     "-" if row.score is None else str(row.score),
                     "-" if row.tier is None else str(row.tier),
                     "-" if row.whole_cost_tu is None else f"{row.whole_cost_tu:.2f}",
+                    "-" if row.p95_cost_tu is None else f"{row.p95_cost_tu:.2f}",
                     "-" if row.cost_tu is None else f"{row.cost_tu:.2f}",
                     row.confidence,
                     f"`{row.route}`" if row.route else "-",
@@ -597,8 +698,11 @@ def render_csv(rows: list[DifficultyRow]) -> str:
         (
             "item",
             "score",
+            "cost_score",
             "tier",
             "whole_cost_tu",
+            "p95_cost_tu",
+            "tail_score",
             "cost_tu",
             "confidence",
             "route",
@@ -613,8 +717,11 @@ def render_csv(rows: list[DifficultyRow]) -> str:
             (
                 row.item,
                 "" if row.score is None else row.score,
+                "" if row.cost_score is None else row.cost_score,
                 "" if row.tier is None else row.tier,
                 "" if row.whole_cost_tu is None else round(row.whole_cost_tu, 4),
+                "" if row.p95_cost_tu is None else round(row.p95_cost_tu, 4),
+                "" if row.tail_score is None else row.tail_score,
                 "" if row.cost_tu is None else round(row.cost_tu, 4),
                 row.confidence,
                 row.route,

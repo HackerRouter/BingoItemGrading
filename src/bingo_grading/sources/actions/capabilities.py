@@ -20,6 +20,21 @@ from .graph import GraphActions
 # ---------------------------------------------------------------- 行程
 
 
+def access_capability(dimension: str, structure: str) -> str | None:
+    """到达某结构要多付哪一层「开门」。
+
+    通常是维度的访问能力（`DIMENSION_ACCESS`）。末地外岛结构是例外：
+    进了末地只到主岛，末地城还在约 1000 格虚空之外，所以换成
+    `capability:outer_end`——它自己依赖 `the_end_access`，两条到达方式
+    （打龙走折跃门 / 自行搭桥）在构造表里取小。
+    """
+    access = DIMENSION_ACCESS.get(dimension)
+    if access is not None and structure in _constructs.OUTER_END_SETS:
+        return _constructs.OUTER_END
+    return access
+
+
+
 def _ensure_travel(
     record: source_index.SourceRecord,
     ctx: CaseContext,
@@ -114,7 +129,7 @@ def _ensure_capability(
             result.uncovered[f"缺结构密度:{structure}"] += 1
             return None
         travel, label = searched, f"挖矿道搜 {_short(structure)}（{searched.detail}）"
-    access = DIMENSION_ACCESS.get(dimension)
+    access = access_capability(dimension, structure)
     requires: tuple[Requirement, ...] = ()
     if access is not None:
         resolved = _ensure_access(ctx, result, once_caps, dimension, access)

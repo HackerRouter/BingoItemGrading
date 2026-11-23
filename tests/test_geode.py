@@ -59,7 +59,7 @@ def test_geode_route_beats_chest_looting(ctx: CaseContext) -> None:
     built = actions.build(ctx, "minecraft:amethyst_shard")
     aset = built.actionset()
     solved = solve(aset, "minecraft:amethyst_shard", 1.0)
-    cost, action_id, _ = grade.best_whole_cost(
+    cost, action_id, _, _ = grade.best_whole_cost(
         aset, solved.curves, "minecraft:amethyst_shard", 1.0
     )
     assert cost is not None

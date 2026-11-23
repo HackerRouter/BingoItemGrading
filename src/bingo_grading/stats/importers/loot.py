@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -198,6 +199,9 @@ def build(
         density = structure_density.get(set_id) or {}
         for condition, tool_probability in TOOL_VARIANTS:
             per_item: dict[str, float] = {}
+            # 二阶矩加权和：多张表按出现频率混合时，方差不能各自相加，
+            # 得用混合分布的 `E[X²] - E[X]²`。
+            second: dict[str, float] = {}
             assumptions: set[str] = set()
             unsupported: set[str] = set()
             weight_sum = 0
@@ -210,6 +214,10 @@ def build(
                 weight_sum += chest_count
                 for item_id, value in result.per_item.items():
                     per_item[item_id] = per_item.get(item_id, 0.0) + value * chest_count
+                    spread = result.variance.get(item_id, 0.0)
+                    second[item_id] = (
+                        second.get(item_id, 0.0) + (spread + value * value) * chest_count
+                    )
                 assumptions.update(result.assumptions)
                 unsupported.update(result.unsupported)
             if not weight_sum:
@@ -223,6 +231,18 @@ def build(
                 },
                 "trigger": "chest_open",
             }
+            spreads: dict[str, float] = {}
+            for item_id, total in per_item.items():
+                mean = total / weight_sum
+                if mean <= 0:
+                    continue
+                e2 = second.get(item_id, 0.0) / weight_sum
+                variance = max(0.0, e2 - mean * mean)
+                if variance <= 0:
+                    continue
+                spreads[item_id] = round(math.sqrt(variance) / mean, 6)
+            if spreads:
+                value["per_trigger_cv"] = spreads
             chests = loot.chests_per_structure
             if chests:
                 value["chests_per_structure"] = chests
@@ -269,11 +289,31 @@ def _table_value(result: TableExpectation, loot: StructureLoot) -> dict:
         "trigger": "chest_open",
         "table": result.table,
     }
+    spreads = _cv_map(result)
+    if spreads:
+        value["per_trigger_cv"] = spreads
     if result.assumptions:
         value["assumptions"] = list(result.assumptions)
     if result.unsupported:
         value["unsupported"] = list(result.unsupported)
     return value
+
+
+def _cv_map(result: TableExpectation) -> dict[str, float]:
+    """一张表：每件物品**一次触发**产出的相对标准差（`sd / mean`）。
+
+    0 的不写（全是确定量时整个键省掉），下游按「无方差信息」处理。
+    这批数是 `plan` 层 `Segment.cv` 的唯一上游。
+    """
+    out: dict[str, float] = {}
+    for item_id, mean in result.per_item.items():
+        if mean <= 0:
+            continue
+        variance = result.variance.get(item_id, 0.0)
+        if variance <= 0:
+            continue
+        out[item_id] = round(math.sqrt(variance) / mean, 6)
+    return out
 
 
 def build_drops(
@@ -339,6 +379,9 @@ def build_drops(
                 "trigger": trigger,
                 "table": table_id,
             }
+            spreads = _cv_map(result)
+            if spreads:
+                value["per_trigger_cv"] = spreads
             if result.assumptions:
                 value["assumptions"] = list(result.assumptions)
             if result.unsupported:

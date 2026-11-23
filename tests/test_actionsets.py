@@ -273,12 +273,12 @@ def test_persisted_graph_solves_like_whole_graph() -> None:
     )
     by_id = {action.action_id: action for action in graph.actionset.actions}
     for name in ("minecraft:diamond", "minecraft:coal", "minecraft:glowstone_dust"):
-        full, _, _ = grade_module.best_whole_cost(
+        full, _, _, _ = grade_module.best_whole_cost(
             graph.actionset, solved.curves, name, 1.0, actions_by_id=by_id
         )
         subset = graph.subgraph(name)
         small = solve_plan(subset, name, 1.0, prune_dominated=False)
-        whole, _, _ = grade_module.best_whole_cost(
+        whole, _, _, _ = grade_module.best_whole_cost(
             subset, small.curves, name, 1.0
         )
         assert whole == full, name

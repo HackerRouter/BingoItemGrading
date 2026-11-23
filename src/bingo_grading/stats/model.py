@@ -121,6 +121,9 @@ STAT_VALUE_SCHEMA: dict[str, dict[str, tuple[str, ...]]] = {
             "table",
             "chests_per_structure",
             "structure_frequency",
+            # 每件物品一次触发的相对标准差（`sd / mean`）。来源是战利品表的
+            # `rolls` 分布 / 条目权重 / `set_count` 分布；缺省即「按确定量处理」。
+            "per_trigger_cv",
             "assumptions",
             "unsupported",
             "variant_breakdown",

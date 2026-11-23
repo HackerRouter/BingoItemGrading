@@ -7,6 +7,7 @@ from pathlib import Path
 from bingo_grading import paths
 from bingo_grading import units
 from bingo_grading import gamedata
+from bingo_grading import copper_facts
 from bingo_grading import mining_facts
 from bingo_grading.case.context import CaseContext
 from bingo_grading.case.sources import seconds
@@ -28,9 +29,7 @@ def _placeholder_variants(
     if not prefix.startswith("capability:lava_access"):
         return []
     out: list[tuple[str, tuple[Requirement, ...]]] = []
-    for source in ctx.patch_sources(
-        _constructs.LAVA, blocks_per_patch=gamedata.LAVA_BLOCKS_PER_PATCH
-    ):
+    for source in ctx.patch_sources(_constructs.LAVA):
         access = f"{prefix}@{source.key}"
         result.emit(
             Action(
@@ -194,10 +193,17 @@ def _transmute_sources(item: str, ctx: CaseContext, result: GraphActions) -> Non
 
     依赖前缀：`block:` / `item:` 是消耗品（`per_use`），`tool:` 是工具
     （`once`，可反复用），`assume:water_source` 是环境能力（也 `once`）。
+
+    **铜氧化的 `assume:time` 规则跳过**：`code/transform` 里同一批方块还有一条
+    「放着等它痂」的规则，那是同一件事的另一种说法，而真实路线已由
+    `_oxidation_source()` 按 `copper_facts` 接上（1600/1200/1200 秒）。
+    不跳过的话 45 条规则每条都会记一次「未建模的变换依赖」，把 `uncovered`
+    榜首顶成 78 次纯噪声。**只跳这一种节点**：铜族的去皮/刮蜡同样是真实路线。
     """
     resolved = paths.recipe_analysis(ctx.pack_version())
     if not resolved.exists:
         return
+    oxidizable = copper_facts.load(ctx.pack_version())
     rules = _transmute_rules(str(resolved.path / "graph.json")).get(item)
     if not rules:
         return
@@ -228,6 +234,12 @@ def _transmute_sources(item: str, ctx: CaseContext, result: GraphActions) -> Non
                     break
                 requires.append(Requirement(capability, 1.0, MODE_ONCE))
             else:
+                # 铜氧化：真实路线已由 `_oxidation_source` 给出，这条
+                # `assume:time` 规则是同一件事的另一种写法。跳过**这条规则**，
+                # 不记账（否则 `uncovered` 里会多出一批纯噪声）。
+                if node == "assume:time" and item in oxidizable:
+                    usable = False
+                    break
                 # 不认识的依赖不猜：宁可这条路缺席，也不要凭空免费。
                 result.uncovered[f"未建模的变换依赖:{node}"] += 1
                 usable = False

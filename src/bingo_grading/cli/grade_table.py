@@ -157,7 +157,7 @@ def _rows_from_curves(
     by_id = {action.action_id: action for action in actionset.actions}
     rows = []
     for name in items:
-        whole, action_id, label = grade_module.best_whole_cost(
+        whole, action_id, label, spread = grade_module.best_whole_cost(
             actionset,
             solved.curves,
             name,
@@ -185,6 +185,7 @@ def _rows_from_curves(
                 uncovered=uncovered,
                 segments=len(curve.segments),
                 demand=args.count,
+                variance=spread,
             )
         )
         if bar is not None:
@@ -311,7 +312,7 @@ def _grade_together(
     breakdown: list[dict] = []
     for item in items:
         solved = solve_plan(aset, item, args.count)
-        cost, action_id, label = grade_module.best_whole_cost(
+        cost, action_id, label, _spread = grade_module.best_whole_cost(
             aset, solved.curves, item, args.count
         )
         breakdown.append(
@@ -378,7 +379,7 @@ def _emit_histogram(rows, actionset, solved, args: argparse.Namespace) -> dict:
     by_id = {action.action_id: action for action in actionset.actions}
     marks = []
     for item, label, color in histogram_module.GATES:
-        whole, _action_id, _label = grade_module.best_whole_cost(
+        whole, _action_id, _label, _spread = grade_module.best_whole_cost(
             actionset, solved.curves, item, args.count, actions_by_id=by_id
         )
         if whole is None or not math.isfinite(whole) or whole <= 0:

@@ -264,9 +264,17 @@ SNIFFER_CONSTRUCTS: tuple[Construct, ...] = (
 #   ender_eye      ← ender_pearl + blaze_powder
 #   blaze_powder   ← blaze_rod ← 下界要塞刷怪笼
 ENDER_EYE = "minecraft:ender_eye"
+ENDER_PEARL = "minecraft:ender_pearl"
 GLASS_BOTTLE = "minecraft:glass_bottle"
 DRAGON_BREATH = "minecraft:dragon_breath"
 DRAGON_EGG = "minecraft:dragon_egg"
+
+# 末地外岛（末地城、末地船）。进了末地只到主岛，外岛在约 1000 格虚空之外。
+# 两条到达方式各自是一条构造，求解器对同一产物取小；`end:gateway` 顺带出龙蛋。
+OUTER_END = "capability:outer_end"
+
+# 哪些结构集合在外岛。目前只有末地城（末地船是它的一部分，不单列集合）。
+OUTER_END_SETS = frozenset({"minecraft:end_cities"})
 
 END_CONSTRUCTS: tuple[Construct, ...] = (
     Construct(
@@ -279,19 +287,23 @@ END_CONSTRUCTS: tuple[Construct, ...] = (
         source="game_rule",
     ),
     # 龙蛋：末影龙死后在返回传送门上方生成，**不是掉落物**。所以成本 = 打赢
-    # 一场龙战（不拆床、不利用瞬时击杀，按正常拆水晶流程取 20 分钟）
-    # + 把蛋取走（挖掉或推走，都只要一下）。
+    # 一场龙战（不拆床、不利用瞬时击杀，按正常拆水晶流程）+ 把蛋取走（挖掉或推走，
+    # 都只要一下）。龙战时长 365 s 是 2026-11-23 的实测均值（n=6，窗口从落主岛到
+    # 龙蛋进背包，含摆水晶与复活读秒），原估值 20 分钟是它的 3.3 倍。
     Construct(
         id="dragon:egg",
         product=DRAGON_EGG,
         amount=1.0,
         inputs=((THE_END_ACCESS, 1.0),),
         seconds=gamedata.DRAGON_FIGHT_SECONDS + gamedata.PLACE_SECONDS,
-        label="进末地打赢一场末影龙（约 20 分钟），龙死后返回传送门上方生成龙蛋，取走",
+        label="进末地打赢一场末影龙（实测约 6 分钟），龙死后返回传送门上方生成龙蛋，取走",
         source="game_rule",
     ),
     # 龙息不需要打末影龙：等它喷一轮，拿瓶子接就行。所以成本几乎等于
     # 「进得去末地」，而不是「打赢一场龙战」。
+    #
+    # 鞘翅不能照此推论：它在外岛末地城，那里离主岛约 1000 格虚空。这一段由
+    # `capability:outer_end` 单独承担（下面两条构造），龙息不依赖它。
     Construct(
         id="end:dragon_breath",
         product=DRAGON_BREATH,
@@ -299,6 +311,41 @@ END_CONSTRUCTS: tuple[Construct, ...] = (
         inputs=((THE_END_ACCESS, 1.0), (GLASS_BOTTLE, 1.0)),
         seconds=gamedata.DRAGON_BREATH_SECONDS,
         label="进末地后等末影龙喷火球、用玻璃瓶接龙息（不用打死它）",
+        source="game_rule",
+    ),
+    # 到达外岛（末地城）的两条路。模型对同一产物取小，两条都建，不手工挑便宜的。
+    #
+    # 路径 1：打完龙走折跃门。折跃门在龙死后生成于主岛边缘，**必须扔末影珍珠
+    # 穿过去**（走进去不传送）。代价 = 一场龙战 + 走到门 + 一颗珍珠。
+    #
+    # `DRAGON_FIGHT_SECONDS` 的窗口里含两段只属于测量场景的时间（摆 4 个水晶 +
+    # 复活读秒 25.5 s、龙死→糘蛋 23.1 s），这里**不扣**：真实进末地时玩家落在
+    # 离主岛约 100 格的黑曜石平台上，走到龙面前那一段本身就是同样量级的开销，
+    # 两边相抵。为只去外岛的人再抠那 23 秒，精度还不如“落地位置”本身的随机性。
+    #
+    # 它顺带产出龙蛋，但模型按「每件物品单独算一条路线」计价：同时要龙蛋和
+    # 鞘翅时这 365 秒会被算两次。这是已知的保守偏差——图里没有「多个物品共享
+    # 同一场战斗」的表达能力，记在 `docs/planning/todo.md` §2.9。
+    Construct(
+        id="end:gateway",
+        product=OUTER_END,
+        amount=1.0,
+        inputs=((THE_END_ACCESS, 1.0), (ENDER_PEARL, 1.0)),
+        seconds=gamedata.DRAGON_FIGHT_SECONDS + gamedata.END_GATEWAY_SECONDS,
+        label="打完末影龙，从主岛边缘的折跃门扔末影珍珠穿到外岛",
+        source="game_rule",
+    ),
+    # 路径 2：不打龙，自己搭桥横渡约 1000 格虚空。
+    #
+    # 只算「边后退边放」的移动，**不计挖方块**：1000 格约 16 组（1025 块），
+    # 玩家背包背得下，而且会自带木头/泥土这类好挖的，不会临时去挖末地石。
+    Construct(
+        id="end:bridge",
+        product=OUTER_END,
+        amount=1.0,
+        inputs=((THE_END_ACCESS, 1.0),),
+        seconds=gamedata.END_OUTER_GAP_BLOCKS / gamedata.END_BRIDGE_BLOCKS_PER_SECOND,
+        label="从主岛边缘搭桥横渡约 1000 格虚空到外岛（不打死龙）",
         source="game_rule",
     ),
 )

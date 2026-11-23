@@ -196,6 +196,41 @@ def test_nether_portal_has_two_constructions(ctx: CaseContext) -> None:
     assert patch_obsidian < full_obsidian, "补全竟然比满框还费黑曜石"
 
 
+def test_outer_end_is_its_own_capability(ctx: CaseContext) -> None:
+    """末地城在**外岛**：进了末地还要跨约 1000 格虚空，不能只挂 `the_end_access`。
+
+    这条挡的是「批量路径自己查 `DIMENSION_ACCESS`」的旧写法。`_structure_batches`
+    曾经绕过 `_ensure_capability` 的判定，于是外岛这一段整段没进成本——`elytra`
+    只有 1219 TU，59.55 TU 的行程就是全部（那是城间距，不是主岛过去的路）。
+    """
+    from bingo_grading.sources import constructs
+
+    built = actions.build(ctx, "minecraft:elytra")
+    travel = built.actionset().get("travel:minecraft:end_cities")
+    assert travel is not None, "末地城的行程动作没造出来"
+    required = {r.item for r in travel.requires}
+    assert constructs.OUTER_END in required, (
+        f"末地城没挂外岛前置，拿到的是 {sorted(required)}——"
+        "进了末地只到主岛，外岛还在约 1000 格虚空之外"
+    )
+
+    # 两条到达方式都要在，引擎才有得比价：打龙走折跃门 / 自行搭桥。
+    ids = {c.id for c in constructs.CONSTRUCTS if c.product == constructs.OUTER_END}
+    assert ids == {"end:gateway", "end:bridge"}, f"外岛的构造只剩 {sorted(ids)}"
+
+    # 外岛那段真的进了总成本：elytra 不能低于「最便宜的外岛到达方式」。
+    solved = solve(built.actionset(), "minecraft:elytra", 1.0)
+    assert solved.plan.feasible
+    cheapest = min(
+        c.seconds
+        for c in constructs.CONSTRUCTS
+        if c.product == constructs.OUTER_END
+    )
+    assert solved.plan.cost > cheapest, (
+        f"elytra 只算出 {solved.plan.cost:.1f} TU，连外岛的 {cheapest:.1f} s 都没算进去"
+    )
+
+
 def test_patching_a_ruined_frame_refuses_casting(ctx: CaseContext) -> None:
     """补现成框架只要**现成的黑曜石**，从零垒整框才允许浇铸。
 

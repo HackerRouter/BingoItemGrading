@@ -32,7 +32,6 @@ class PatchesMixin:
         subject: str,
         *,
         dimension: str | None = None,
-        blocks_per_patch: float = 50.0,
     ) -> PatchSource | None:
         """成湖资源（地表岩浆湖）：按**实测的湖间距 + 湖的容量**定价。
 
@@ -89,8 +88,7 @@ class PatchesMixin:
                 blocks_per_patch=blocks,
                 detail=(
                     f"{subject} 地表岩浆湖：最近 {distance:.0f} 格"
-                    f"（{row.provenance}），每湖约 {size:.0f} 块 → "
-                    f"{blocks / blocks_per_patch:.1f} 批"
+                    f"（{row.provenance}），每湖约 {size:.0f} 块"
                 ),
                 where=f"跑图 {distance:.0f} 格到最近的岩浆湖",
                 kind="lake",
@@ -103,7 +101,7 @@ class PatchesMixin:
         subject: str,
         *,
         dimension: str | None = None,
-        blocks_per_patch: float = 50.0,
+        blocks_per_patch: float | None = None,
     ) -> list[PatchSource]:
         """地下**成片**资源的每一段一个来源，按到达成本升序。
 
@@ -130,13 +128,20 @@ class PatchesMixin:
         散点」可信得多。只有在没有湖数据时才退回下面的纵段散点口径。
         """
         dimension = dimension or self.dimension
-        if not blocks_per_patch > 0:
-            raise CaseError(f"一片的块数必须为正：{blocks_per_patch}")
-        lake = self.lake_source(
-            subject, dimension=dimension, blocks_per_patch=blocks_per_patch
-        )
+        lake = self.lake_source(subject, dimension=dimension)
         if lake is not None:
             return [lake]
+        # 散点兜底：走到这里说明**没有成湖数据**。以前这里有个
+        # `gamedata.LAVA_BLOCKS_PER_PATCH = 50` 的默认值，那是拍的——而 worldgen
+        # 采集器本来就量过每湖块数（`mean_size`），正常情况在 `lake_source`
+        # 就返回了。真缺湖数据时拒绝用猜的数字继续估价，由调用方显式给值。
+        if blocks_per_patch is None:
+            raise CaseError(
+                f"{subject} 没有成湖数据（structure_density 里缺这一组），"
+                "且调用方没显式给每片块数：拒绝用默认值继续估价"
+            )
+        if not blocks_per_patch > 0:
+            raise CaseError(f"一片的块数必须为正：{blocks_per_patch}")
         rows = [
             row
             for row in self.store.rows.values()

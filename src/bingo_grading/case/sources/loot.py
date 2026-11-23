@@ -113,7 +113,11 @@ def _site_travel(
     found = ctx.nearest_distance(structure)
     if found is None:
         return None
-    surface = ctx.travel(found.value, underground=False).value
+    # 水下结构（沉船、海底神殿、海底废墟）游泳只有步行的一半速度。以前这里
+    # 一律按地表算，到达成本被低估一半——`structure_water_share()` 早就把这个
+    # 判断做出来了（按实例数加权的体积水占比），不需要新数据。
+    underwater = ctx.is_underwater_structure(structure)
+    surface = ctx.travel(found.value, underground=False, underwater=underwater).value
     if underground_share <= 0:
         return surface
     under = ctx.travel(found.value, underground=True).value

@@ -6,6 +6,12 @@ from __future__ import annotations
 from .model import Sourced, _structure_maps, _with_wall_variants
 
 class ContentMixin:
+    def loot_aliases(self) -> dict[str, tuple[str, ...]]:
+        """挂墙变体 → 本体的别名表（上游的 `dropsLike` 关系）。"""
+        from bingo_grading.loot_alias import load as load_aliases
+
+        return load_aliases(self.pack_version())
+
     def _templated_subjects(self) -> frozenset:
         """有模板解析的结构变体：它们的实测行不能用作方块来源。"""
         cached = self._templated_cache
@@ -52,7 +58,7 @@ class ContentMixin:
         for set_id, variants in maps.members:
             for variant in variants:
                 variant_to_set[variant] = set_id
-        names = _with_wall_variants(block)
+        names = _with_wall_variants(block, self.loot_aliases())
         # `None` 表示不按维度筛。方块在哪生成就是哪——镶金黑石只在下界，
         # 而调用方默认在主世界，按默认维度筛会把它判成「没有来源」。
         scope = dimension
@@ -111,7 +117,8 @@ class ContentMixin:
         两种来源分开算，成本模型不同：
 
         - `spawners_per_start`：刷怪笼（键形如 `mob_spawner|blaze`）——**无限刷**，
-          在那儿等着就行，单价按「等一只 + 打一只」摊；
+          在那儿等着就行，单价按「等一只」的周期摊。两种笼子的周期不是一个量级：
+          `mob_spawner` 是 200–800 tick，`trial_spawner` 是 20–160 tick 补一批；
         - `entities_per_start`：结构自带、已生成好的（末地城每处 21 只潜影贝）——
           **一趟打完就没了**，单价按「一趟打完全部」摊。
 

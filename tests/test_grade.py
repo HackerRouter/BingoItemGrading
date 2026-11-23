@@ -106,7 +106,7 @@ def test_whole_cost_beats_shortcut_route(ctx: CaseContext) -> None:
     """绿宝石的最优「均摊」是跑一趟试炼大厅，但拿第一颗不该按那一趟算。"""
     built = actions.build(ctx, "minecraft:emerald")
     solved = solve(built.actionset(), "minecraft:emerald", 1.0)
-    cost, action_id, _ = grade.best_whole_cost(
+    cost, action_id, _, _ = grade.best_whole_cost(
         built.actionset(), solved.curves, "minecraft:emerald", 1.0
     )
     assert cost is not None
@@ -125,7 +125,7 @@ def test_whole_cost_recurses_into_inputs(ctx: CaseContext) -> None:
     """原料也按整次计价：只对目标层取整会让「买一整批原料」按均摊算。"""
     built = actions.build(ctx, "minecraft:ender_eye")
     solved = solve(built.actionset(), "minecraft:ender_eye", 1.0)
-    cost, action_id, _ = grade.best_whole_cost(
+    cost, action_id, _, _ = grade.best_whole_cost(
         built.actionset(), solved.curves, "minecraft:ender_eye", 1.0
     )
     assert cost is not None
@@ -147,7 +147,7 @@ def test_whole_cost_converges_to_amortised_at_large_demand(ctx: CaseContext) -> 
     built = actions.build(ctx, "minecraft:coal")
     aset = built.actionset()
     solved = solve(aset, "minecraft:coal", 32.0)
-    whole, _, _ = grade.best_whole_cost(aset, solved.curves, "minecraft:coal", 32.0)
+    whole, _, _, _ = grade.best_whole_cost(aset, solved.curves, "minecraft:coal", 32.0)
     assert whole is not None
     # 32 件时不该再出现数量级的偏差（N=1 时是 10 倍）。
     # 注意只断言上界：整次可以**比均摊更便宜**，因为它会按整次重新组合来源，
@@ -163,7 +163,7 @@ def test_atomic_routes_are_rounded_up(ctx: CaseContext) -> None:
     """跑一趟只产出一小部分需求时，必须付整趟：调用次数向上取整。"""
     built = actions.build(ctx, "minecraft:elytra")
     solved = solve(built.actionset(), "minecraft:elytra", 1.0)
-    cost, action_id, _ = grade.best_whole_cost(
+    cost, action_id, _, _ = grade.best_whole_cost(
         built.actionset(), solved.curves, "minecraft:elytra", 1.0
     )
     assert action_id.startswith("loot:")
@@ -179,6 +179,7 @@ def _row(**overrides) -> grade.DifficultyRow:
     base = dict(
         item="minecraft:coal",
         score=2,
+        cost_score=2,
         tier=1,
         cost_tu=0.61,
         whole_cost_tu=3.05,
@@ -219,8 +220,9 @@ def test_csv_table_keeps_raw_numbers() -> None:
     text = grade.render_csv([_row()])
     lines = text.splitlines()
     assert not text.startswith("\ufeff"), "BOM 由写文件那一层加，不在文本里"
-    assert lines[0].startswith("item,score,tier,whole_cost_tu")
-    assert "minecraft:coal,2,1,3.05,0.61" in lines[1]
+    assert lines[0].startswith("item,score,cost_score,tier,whole_cost_tu,p95_cost_tu,tail_score")
+    # `score` 取两维最大，`cost_score` 留原始均摊分；没有方差信息时两者相同。
+    assert "minecraft:coal,2,2,1,3.05,,,0.61" in lines[1]
 
 
 def test_csv_file_carries_utf8_bom(tmp_path: Path) -> None:

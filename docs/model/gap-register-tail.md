@@ -50,7 +50,7 @@ stat_type（850 行），结构权重、袭击波次都进了动作图。本节�
 | `evoker` | 林地府邸、袭击 | `totem_of_undying` 算不出 |
 | `vindicator` | 林地府邸、袭击 | `iron_axe` 少一条路 |
 | `guardian` / `elder_guardian` | 海底神殿 | `prismarine_shard` 算不出 |
-| `wither_skeleton` | 下界要塞 | 只能借「要塞刷怪笼」这一条（而它不是笼子刷的） |
+| `wither_skeleton` | 下界要塞 | 借要塞的刷怪权重池，按**区域刷怪**周期计（不是刷怪笼的 200–800 tick） |
 | `ghast` | 下界荒地 | `ghast_tear` 算不出 |
 
 **为什么静态扫描拿不到**：

@@ -41,12 +41,51 @@ class LootMixin:
 
         需要把多种物品折算成同一目标时用它（金锭 = 金锭 + 金粒/9 + 金块×9）。
         """
+        row = self._loot_row(subject, dimension, condition)
+        if row is None:
+            return None
+        per_chest = row.value.get("per_trigger_expected") or {}
+        return (
+            {item: float(value) for item, value in per_chest.items()},
+            f"{subject}[{row.condition}]",
+        )
+
+    def loot_cv(
+        self,
+        subject: str,
+        item: str,
+        *,
+        dimension: str | None = None,
+        condition: str = "tools=tools=present",
+    ) -> float:
+        """某结构/表**一次触发**产出该物品的相对标准差（`sd / mean`）。
+
+        上游是 `stats/importers/loot.py` 写的 `per_trigger_cv`，源头是战利品表的
+        `rolls` / 条目权重 / `set_count` 分布。没有数据时返回 0（按确定量处理），
+        不猜——0 在 `Segment.cv` 里的含义正是「无方差信息」。
+        """
+        row = self._loot_row(subject, dimension, condition)
+        if row is None:
+            return 0.0
+        spreads = row.value.get("per_trigger_cv") or {}
+        value = spreads.get(item)
+        return float(value) if isinstance(value, (int, float)) else 0.0
+
+    def _loot_row(
+        self,
+        subject: str,
+        dimension: str | None = None,
+        condition: str = "tools=tools=present",
+    ):
+        """挑出适用的那一行 `loot_expectation`。
+
+        维度只作为**偏好**，不是硬过滤：上游有些表把维度标错了
+        （`chests/bastion_other` 标成 `minecraft:overworld`，它其实在下界），
+        硬过滤会把整张表判成「没有数据」。表名本身已经唯一确定结构，
+        按「同维度 → 空维度 → 其它维度」排序取第一条即可。
+        """
         dimension = dimension or self.dimension
         condition = _normalize_condition(condition)
-        # 维度只作为**偏好**，不是硬过滤：上游有些表把维度标错了
-        # （`chests/bastion_other` 标成 `minecraft:overworld`，它其实在下界），
-        # 硬过滤会把整张表判成「没有数据」。表名本身已经唯一确定结构，
-        # 按「同维度 → 空维度 → 其它维度」排序取第一条即可。
         candidates: list = [
             row
             for row in self.store.of("loot_expectation", subject)
@@ -56,13 +95,8 @@ class LootMixin:
             key=lambda row: 0 if row.dimension == dimension else (1 if not row.dimension else 2)
         )
         for row in candidates:
-            per_chest = row.value.get("per_trigger_expected") or {}
-            if not per_chest:
-                continue
-            return (
-                {item: float(value) for item, value in per_chest.items()},
-                f"{subject}[{row.condition}]",
-            )
+            if row.value.get("per_trigger_expected"):
+                return row
         return None
 
 

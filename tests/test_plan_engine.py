@@ -20,6 +20,7 @@ from bingo_grading.plan import (
     Segment,
     build_schedule,
     merge,
+    merge_race,
     prune,
     solve,
 )
@@ -64,6 +65,76 @@ def test_compose_applies_ratio_and_fixed_cost() -> None:
 def test_curve_rejects_non_positive_capacity() -> None:
     with pytest.raises(Exception):
         Segment("a", 1.0, 0.0)
+
+
+# ---------------------------------------------------------------- 方差（§2.8）
+
+
+def test_variance_is_zero_without_cv() -> None:
+    """没有 cv 信息就是确定性来源：方差 0，p95 与均值相同。"""
+    curve = Curve.of([Segment("a", 2.0, 10.0)])
+    assert curve.variance(4.0) == 0.0
+    assert curve.tail_cost(4.0) == pytest.approx(curve.cost(4.0))
+
+
+def test_variance_accumulates_within_one_segment() -> None:
+    """单段：`Var = n · (unit · cv)²`，且不动 `cost()`。"""
+    curve = Curve.of([Segment("a", 2.0, 10.0, cv=0.5)])
+    assert curve.cost(4.0) == pytest.approx(8.0)
+    assert curve.variance(4.0) == pytest.approx(4.0 * (2.0 * 0.5) ** 2)
+
+
+def test_variance_adds_across_segments() -> None:
+    """串联用到的两段各自累加——独立随机变量的方差可加。"""
+    curve = merge(
+        Curve.of([Segment("a", 2.0, 3.0, cv=0.5)]),
+        Curve.of([Segment("b", 4.0, 10.0, cv=1.0)]),
+    )
+    # 5 件：走 a 的 3 件 + b 的 2 件（总价 14 < 只走 b 的 20）
+    want = 3 * (2.0 * 0.5) ** 2 + 2 * (4.0 * 1.0) ** 2
+    assert curve.variance(5.0) == pytest.approx(want)
+
+
+def test_tail_cost_uses_one_sided_95_percent() -> None:
+    curve = Curve.of([Segment("a", 2.0, 10.0, cv=0.5)])
+    base = curve.cost(4.0)
+    sd = math.sqrt(curve.variance(4.0))
+    assert curve.tail_cost(4.0) == pytest.approx(base + 1.645 * sd)
+
+
+def test_race_merges_cv_by_rate() -> None:
+    """并行：速率相加，`cv(R) = √Σ(rᵢ·cvᵢ)² / Σrᵢ`。"""
+    merged = merge_race(
+        [Segment("a", 10.0, 5.0, cv=1.0), Segment("b", 20.0, 5.0, cv=1.0)]
+    )
+    rates = [1.0 / 10.0, 1.0 / 20.0]
+    want = math.sqrt(sum((rate * 1.0) ** 2 for rate in rates)) / sum(rates)
+    assert merged.cv == pytest.approx(want)
+
+
+def test_compose_thins_cv_by_yield() -> None:
+    """串联配方把波动摊到更多成品上：`cv' = cv·u / ((u+fixed)·√ratio)`。"""
+    parent = Curve.of([Segment("ore", 6.0, 10.0, cv=1.0)])
+    child = parent.compose(ratio=2.0, fixed=1.0)
+    assert child.segments[0].cv == pytest.approx(6.0 / (7.0 * math.sqrt(2.0)))
+
+
+def test_segment_rejects_negative_cv() -> None:
+    with pytest.raises(Exception):
+        Segment("a", 1.0, 1.0, cv=-0.1)
+
+
+def test_action_carries_yield_cv_round_trip() -> None:
+    """新字段必须过 `from_dict`，否则落盘再读回来方差会静默归零。"""
+    action = Action(
+        action_id="loot:chest",
+        item="minecraft:coal",
+        cost=3.0,
+        yields={"minecraft:coal": 0.75},
+        yield_cv=1.897,
+    )
+    again = Action.from_dict(action.as_dict(full=True))
+    assert again.yield_cv == pytest.approx(1.897)
 
 
 # ---------------------------------------------------------------- 动作与剪枝

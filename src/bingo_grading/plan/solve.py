@@ -357,6 +357,11 @@ def solve(
                     label=action.label,
                     # 分量序号当层的替代：同价时先用依赖更浅的来源。
                     level=position,
+                    # 方差只向下传「单次产出的相对波动」，不折进单价。
+                    # **只有主产物能拿它**：`yield_cv` 描述的是 `action.item` 的波动，
+                    # 一条动作顺带产出的其它物品（开一箱拿到五样）波动各不相同，
+                    # 套用主产物那份数就是错的——那些物品的方差按「无信息」处理。
+                    cv=action.yield_cv if item == action.item else 0.0,
                 )
                 slot = slots.setdefault(item, {})
                 if slot.get(action.action_id) == segment:

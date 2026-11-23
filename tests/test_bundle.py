@@ -43,7 +43,7 @@ def _bundle_of(ctx: CaseContext, items: list[str]) -> tuple[object, float]:
     separate = 0.0
     for item in items:
         solved = solve(aset, item, 1.0)
-        cost, _, _ = grade.best_whole_cost(aset, solved.curves, item, 1.0)
+        cost, _, _, _ = grade.best_whole_cost(aset, solved.curves, item, 1.0)
         separate += cost or 0.0
     return bundle, separate
 

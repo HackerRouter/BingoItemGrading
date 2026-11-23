@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import math
+
 from bingo_grading import gamedata
 from bingo_grading.case.context import CaseContext
 from bingo_grading.case.sources import seconds
 from bingo_grading.plan import Action, Requirement
 from bingo_grading.plan.actions import MODE_ONCE, MODE_PER_USE
 
-from .capabilities import _ensure_access, _ensure_capability
-from .common import DIMENSION_ACCESS, GADGET_SOURCES, _short, _structure_maps
+from .capabilities import _ensure_access, _ensure_capability, access_capability
+from .common import GADGET_SOURCES, _short, _structure_maps
 from .graph import GraphActions
 
 
@@ -55,7 +57,7 @@ def _structure_batches(
     返回被覆盖的结构集合，`_loot` 据此跳过逐表路线，避免重复计价。
     """
     mapping = _structure_maps()
-    groups: dict[str, dict[str, dict[str, float]]] = {}
+    groups: dict[str, dict[str, dict]] = {}
     for row in ctx.store.rows.values():
         if row.stat_type != "loot_expectation":
             continue
@@ -66,7 +68,14 @@ def _structure_batches(
         if not expected:
             continue
         groups.setdefault(structure, {})[row.subject] = {
-            item: float(amount) for item, amount in expected.items() if amount > 0
+            "expected": {
+                item: float(amount) for item, amount in expected.items() if amount > 0
+            },
+            # 每箱产出的相对标准差，用来把一趟的产出方差拼起来。
+            "cv": {
+                item: float(value)
+                for item, value in (row.value.get("per_trigger_cv") or {}).items()
+            },
         }
 
     # 先登记（即使下面因为缺箱数而造不出动作也先占位）：占位比“重复计价”安全，
@@ -83,7 +92,7 @@ def _structure_batches(
         cap = _ensure_capability(ctx, result, once_caps, structure, route="")
         if cap is None:
             continue
-        access = DIMENSION_ACCESS.get(dimension)
+        access = access_capability(dimension, structure)
         access_cap: str | None = None
         if access is not None:
             access_cap = _ensure_access(ctx, result, once_caps, dimension, access)
@@ -101,12 +110,19 @@ def _structure_batches(
             requires.append(Requirement(map_item, 1.0, MODE_PER_USE))
 
         yields: dict[str, float] = {}
-        for table, expected in tables.items():
+        # 一趟里各表各自的箱子是**独立抽样**，所以方差与均值一样线性相加：
+        # `Var_趟 = Σ count·cvᵢ²·μᵢ²`。不能用混合分布那套 `E[X²]-E[X]²`
+        # ——那个是「随机挑一张表开一箱」，箱子一多就会把方差项减成负数。
+        spread: dict[str, float] = {}
+        for table, data in tables.items():
             per_site = ctx.loot_tables_per_site(structure, table, dimension=dimension)
             # 分表箱数拿不到时退回容器总数（偏乐观，明细在 label 里标出）。
             count = per_site.value if per_site is not None else chests.value
-            for item, amount in expected.items():
+            for item, amount in data["expected"].items():
                 yields[item] = yields.get(item, 0.0) + amount * count
+                cv = data["cv"].get(item, 0.0)
+                if cv:
+                    spread[item] = spread.get(item, 0.0) + count * (cv * amount) ** 2
         # 代码塞进结构的物品（末地船的鞘翅）：按「每处几个载体」并进这一趟。
         gadgets: list[str] = []
         for _marker, (gset, carrier, per_carrier, gitem) in GADGET_SOURCES.items():
@@ -123,9 +139,17 @@ def _structure_batches(
         travel = result.bundle.provenance.get(f"travel:{structure}")
         travel_cost = travel.value if travel is not None else 0.0
         opened = chests.value * gamedata.CHEST_SECONDS
+        primary = max(yields, key=lambda name: yields[name])
+        # 一趟的产出方差 → 成本 cv：`cv_趟 · √(每趟件数)`（同 `common.cost_cv`）。
+        # 批量主产物也能用：消费者会再除一次单价，两边的 μ 相互抵消。
+        mean = yields[primary]
+        span = max(0.0, spread.get(primary, 0.0))
+        site_cv = (
+            math.sqrt(span) / mean * math.sqrt(mean) if mean > 0 and span > 0 else 0.0
+        )
         action = Action(
             action_id=f"loot:{_short(structure)}",
-            item=max(yields, key=lambda name: yields[name]),
+            item=primary,
             cost=travel_cost + seconds(opened),
             yields=yields,
             requires=tuple(requires),
@@ -136,6 +160,9 @@ def _structure_batches(
                 + (f"，另有 {'、'.join(gadgets)}" if gadgets else "")
             ),
             source=f"loot_expectation+structure_content:{structure}",
+            # 只描述**主产物**的波动：`Segment.cv` 是按主产物定的，
+            # 顺带产出的其它物品各走各的来源，不共这一份方差。
+            yield_cv=site_cv,
         )
         result.emit(action)
         made.add(structure)

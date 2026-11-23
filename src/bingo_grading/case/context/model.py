@@ -8,6 +8,7 @@ import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Mapping
 from bingo_grading import paths
 from bingo_grading.gamedata import FISH_WATER_BIOMES, LAVA_LAKE_SETS, WATER_BLOCKS
 from bingo_grading.sources.knowledge import StructureMaps, load_structure_maps
@@ -147,27 +148,32 @@ class BlockExposure:
 
 
 
-def _with_wall_variants(block: str) -> tuple[str, ...]:
-    """方块名连同它的挂墙变体：`dragon_head` → `dragon_wall_head`。
+def _with_wall_variants(
+    block: str, aliases: Mapping[str, tuple[str, ...]] | None = None
+) -> tuple[str, ...]:
+    """方块名连同它的挂墙变体：`torch` → `wall_torch`，`dragon_head` → `dragon_wall_head`。
 
-    结构里的龙头 / 头颅几乎都以挂墙形态生成（末地船船头挂的是
-    `dragon_wall_head`），物品来自挖掉它。只按 `dragon_head` 查
+    结构里的火把 / 告示牌 / 头颅几乎都以挂墙形态生成（末地船船头挂的是
+    `dragon_wall_head`），而物品来自挖掉它。只按本体名字查
     `structure_content.blocks_per_start` 会一个也找不到。
 
-    上游 RA 的 `code_link` 里有 7 条 `loot_alias` 记着这件事
-    （`dragon_head` ← `dragon_wall_head` 等），但那是「掉落表相同」的语义；
-    这里要的是「结构内容里这个方块叫什么名字」，所以按 MC 的命名约定
-    直接拼变体名，不依赖那份 alias 表。
+    `aliases` 来自上游 `code_link.jsonl` 的 `loot_alias`（47 条）：它们记的是
+    游戏里的 `dropsLike` 关系——挂墙变体没有自己的战利品表，直接读本体那张。
+    所以「结构放了 wall_torch」与「shatter 它掉 torch」两头都成立，中间只差
+    一个名字映射，就是这里。
 
-    只处理头颅：其它方块没有「挂墙」这种形态。
+    上游数据缺时退回按 MC 命名约定拼（只能盖头颅那一类），不因为没同步
+    就丢掉整条路线。
     """
     names = [block]
+    if aliases:
+        names.extend(aliases.get(block, ()))
     namespace, _, rest = block.partition(":")
     for suffix, wall in (("_head", "_wall_head"), ("_skull", "_wall_skull")):
         if rest.endswith(suffix):
             names.append(f"{namespace}:{rest[: -len(suffix)]}{wall}")
             break
-    return tuple(names)
+    return tuple(dict.fromkeys(names))
 
 
 

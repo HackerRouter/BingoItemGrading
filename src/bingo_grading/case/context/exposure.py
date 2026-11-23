@@ -31,12 +31,8 @@ class ExposureMixin:
         调用方不能默认当敞开。
         """
         dimension = dimension or self.dimension
-        for row in self.store.rows.values():
-            if (
-                row.stat_type == "block_exposure"
-                and row.subject == block
-                and row.dimension == dimension
-            ):
+        for row in self.store.of("block_exposure", block):
+            if row.dimension == dimension:
                 value = row.value
                 exposure = BlockExposure(
                     per_chunk=float(value.get("per_chunk_density") or 0.0),
@@ -65,12 +61,8 @@ class ExposureMixin:
         - `fill`（含流）算「洞穴体积」——地下水不是可通行空间，扣掉水会凭空
           多出几倍的「洞穴」（实测 y48~63 段从 145 格虚增到 1603 格）。
         """
-        for row in self.store.rows.values():
-            if (
-                row.stat_type == "section_fill"
-                and row.dimension == dimension
-                and not row.biome
-            ):
+        for row in self.store.of_type("section_fill"):
+            if row.dimension == dimension and not row.biome:
                 fills: dict[int, dict[str, float]] = {}
                 for key, cell in (row.value.get("sections") or {}).items():
                     try:
@@ -106,10 +98,8 @@ class ExposureMixin:
         dimension = dimension or self.dimension
         rows = [
             row
-            for row in self.store.rows.values()
-            if row.stat_type == "block_density"
-            and row.subject == block
-            and row.dimension == dimension
+            for row in self.store.of("block_density", block)
+            if row.dimension == dimension
         ]
         if not rows:
             return None

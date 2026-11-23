@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 from bingo_grading import gamedata
@@ -13,7 +14,15 @@ from bingo_grading.sources import index as source_index
 from bingo_grading.sources import template_items
 
 from .capabilities import _ensure_capability, _ensure_travel
-from .common import BINDING_PREFIX, NodeTable, _gadget_for, _is_non_structure, _node_table, _short
+from .common import (
+    BINDING_PREFIX,
+    NodeTable,
+    _gadget_for,
+    _is_non_structure,
+    _node_table,
+    _short,
+    cost_cv,
+)
 from .graph import GraphActions
 
 
@@ -89,7 +98,21 @@ def _loot(
     )
     if action is None:
         result.uncovered[f"缺每箱期望:{record.subject}"] += 1
-    return action
+        return None
+    # 方差按**每箱**期望算，不按每趟：一趟开 `chests` 个箱时，趟级 cv 是
+    # `单箱 cv / √chests`，再乘 √(每趟件数) 化简回来正好是 `单箱 cv · √p`，
+    # 与趟数无关。所以这里只要每箱的 p。
+    per_chest = ctx.loot_per_chest(
+        record.subject,
+        action.item,
+        dimension=ctx.structure_dimension(structure),
+        condition="tools=present",
+    )
+    if per_chest is None:
+        return action
+    return replace(
+        action, yield_cv=cost_cv(ctx, record.subject, action.item, per_chest.value)
+    )
 
 
 
@@ -215,6 +238,10 @@ def _node_source(
             f"凑 1 个要 {1.0 / per_item:.1f} 次）"
         ),
         source=f"loot_expectation:{record.subject}",
+        # `cost` 已经把「平均 1/per_item 次触发」折成一次调用、`yields` 写 1.0，
+        # 所以要的是**凑够 1 件的成本 cv**（≈√(1-p)），不是产出件数的 cv
+        # （≈√(1-p)/√p）。两者差 1/√p 倍：陶片 p=0.067 时会多算 3.7 倍。
+        yield_cv=ctx.loot_cv(record.subject, record.item) * math.sqrt(per_item),
     )
 
 
@@ -255,4 +282,9 @@ def _suspicious(
         requires=requires,
         label=f"在 {_short(structure)} 刷可疑方块（每 {per_item:.2f} 个出一条）",
         source=f"loot_expectation:{record.subject}",
+        # 同 `_node_source`：`cost` 已是「凑 1 条」的全价，cv 要的是成本口径。
+        yield_cv=ctx.loot_cv(
+            record.subject, record.item, dimension=ctx.structure_dimension(structure)
+        )
+        * math.sqrt(per_item),
     )

@@ -78,6 +78,11 @@ class Segment:
     # 解锁一个状态）， **带名字**：`(("capability:village", 2.42), ...)`。
     # 带名字是为了跨层去重——同一条路线里的两笔同名固定成本就是同一件事。
     fixed: tuple[tuple[str, float], ...] = ()
+    # 单次产出件数的**相对标准差**（`sd / mean`）。这一段的成本不是定数：
+    # 凑 `n` 件的成本方差 ≈ `n · (unit_cost · cv)²`。0 表示当作确定性来源。
+    # 目前只有 loot 面算得出真值（`loot/expect.py` 的 `variance / per_item²`），
+    # 其余来源一律 0，报告里按「无方差信息」计，不惩罚。
+    cv: float = 0.0
 
     def __post_init__(self) -> None:
         if self.unit_cost < 0:
@@ -86,6 +91,10 @@ class Segment:
             raise SupplyError(f"段容量必须为正：{self.action_id} = {self.capacity}")
         if self.start < 0:
             raise SupplyError(f"段起点不能为负：{self.action_id} = {self.start}")
+        if not math.isfinite(self.cv) or self.cv < 0:
+            raise SupplyError(
+                f"相对标准差必须有限且非负：{self.action_id} = {self.cv}"
+            )
         for name, amount in self.fixed:
             if amount < 0:
                 raise SupplyError(
@@ -121,6 +130,8 @@ class Segment:
             out["fixed"] = {name: round(amount, 6) for name, amount in self.fixed}
         if self.members:
             out["members"] = [name for name, _ in self.members]
+        if self.cv:
+            out["cv"] = round(self.cv, 6)
         if self.label:
             out["label"] = self.label
         return out
@@ -212,6 +223,49 @@ class Curve:
         if count <= EPS:
             return 0.0
         return fixed_total(self._pick(count)[3])
+
+    def variance(self, count: float) -> float:
+        """取得 `count` 件的**成本方差**（只含段内随机性，固定成本当作确定）。
+
+        单次调用的产出件数若有波动，凑够第 `i` 段的 `nᵢ` 件时成本方差近似
+        `nᵢ · (unitᵢ · cvᵢ)²`——各次调用独立、`cv` 是单次产出的相对标准差。
+
+        **段边界的跳变不在这里**：`cost()` 已经在最优组合上取了真值，跳变是
+        确定性的。这里只补「同一组合内部运气好坏」的那部分，与 `cost` 并列，
+        不乘进 `cost`。容量不够时返回 `inf`。
+        """
+        if count <= EPS:
+            return 0.0
+        used = self.covering(count)
+        if not used:
+            return math.inf
+        remaining = count
+        total = 0.0
+        # `covering` 给的是**填充顺序**（按边际单价升序）；排序后重放一遍
+        # 才能知道每段实际取了几件。
+        for segment in sorted(used, key=lambda item: item.unit_cost):
+            take = min(remaining, segment.capacity)
+            if take <= EPS:
+                break
+            if segment.cv:
+                total += take * (segment.unit_cost * segment.cv) ** 2
+            remaining -= take
+        return total
+
+    def tail_cost(self, count: float, *, z: float = 1.645) -> float:
+        """取得 `count` 件的 **p95 成本**：`cost + z · sd`。容量不够时为 `inf`。
+
+        `z = 1.645` 是正态单侧 95%，与 `p95` 的采集口径一致。这是**查询**，
+        不改变 `cost()` 的口径——要不要用它打分由调用方决定，`Plan.cost`
+        里仍是平均成本。
+        """
+        base = self.cost(count)
+        if not math.isfinite(base):
+            return base
+        spread = self.variance(count)
+        if not math.isfinite(spread):
+            return math.inf
+        return base + z * math.sqrt(spread)
 
     def _candidates(
         self, skip: int, order: Sequence[int], limit: int | None = None
@@ -376,6 +430,15 @@ class Curve:
                 level=seg.level,
                 # 固定成本不随产量放大：做一次配方只付一次。
                 fixed=seg.fixed,
+                # 串联后「每件成品」的波动被产量摊薄：
+                # `Var_out = Var_in / ratio²` 换算到新单价上就是下面这个因子。
+                cv=(
+                    seg.cv
+                    * seg.unit_cost
+                    / ((seg.unit_cost + fixed) * math.sqrt(ratio))
+                    if seg.cv and seg.unit_cost + fixed > 0
+                    else 0.0
+                ),
             )
             for seg in self.segments
         )
@@ -428,7 +491,13 @@ def merge_race(segments: Sequence[Segment], *, label: str = "") -> Segment:
         raise SupplyError(
             "并行来源里不能有零成本成员：速率是无限的，无法按速率分摊件数"
         )
-    unit = 1.0 / sum(1.0 / seg.unit_cost for seg in segments)
+    rates = [1.0 / seg.unit_cost for seg in segments]
+    unit = 1.0 / sum(rates)
+    # 合并后的相对标准差按**速率**加权：各成员独立时 `Var(R) = Σ rᵢ²·cvᵢ²`，
+    # `cv(R) = √Var(R) / Σrᵢ`。速率相加把波动也摊薄了，这正是并行的价值。
+    merged_cv = math.sqrt(
+        sum((rate * seg.cv) ** 2 for rate, seg in zip(rates, segments))
+    ) / sum(rates)
     names = sorted(seg.action_id for seg in segments)
     return Segment(
         action_id="race[" + "|".join(names) + "]",
@@ -440,6 +509,7 @@ def merge_race(segments: Sequence[Segment], *, label: str = "") -> Segment:
         # 并行时每条路各自的一次性投入都要付，但**同名**前置只算一次
         # （同组成员的前置本来就要求一致）。
         fixed=merge_fixed(*(seg.fixed for seg in segments)),
+        cv=merged_cv,
     )
 
 

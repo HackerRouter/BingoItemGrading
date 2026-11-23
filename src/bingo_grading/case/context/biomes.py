@@ -61,9 +61,7 @@ class BiomesMixin:
         面积**的比例，所以分母直接用 256 格²。
         """
         best: tuple[float, str] | None = None
-        for row in self.store.rows.values():
-            if row.stat_type != "biome_patch":
-                continue
+        for row in self.store.of_type("biome_patch"):
             if row.biome != biome:
                 continue
             if dimension is not None and row.dimension != dimension:
@@ -94,19 +92,15 @@ class BiomesMixin:
         if biome is None:
             return None
         fraction = None
-        for row in self.store.rows.values():
-            if row.stat_type != "biome_patch" or row.biome != "minecraft:pale_garden":
+        for row in self.store.of_type("biome_patch"):
+            if row.biome != "minecraft:pale_garden":
                 continue
             value = row.value.get("area_fraction")
             if isinstance(value, (int, float)) and value > 0:
                 fraction = float(value)
                 break
         density = None
-        for row in self.store.rows.values():
-            if row.stat_type != "block_density":
-                continue
-            if row.subject != "minecraft:creaking_heart":
-                continue
+        for row in self.store.of("block_density", "minecraft:creaking_heart"):
             # 只取全图行：群系级行是另一次扫描的口径，两者不能混用。
             if row.biome:
                 continue

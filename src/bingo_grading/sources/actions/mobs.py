@@ -11,7 +11,7 @@ from bingo_grading.plan.actions import MODE_ONCE, MODE_PER_USE
 from bingo_grading.sources import index as source_index
 
 from .capabilities import _ensure_access, _ensure_capability
-from .common import DIMENSION_ACCESS, _short
+from .common import DIMENSION_ACCESS, _short, cost_cv
 from .graph import GraphActions
 
 
@@ -36,7 +36,7 @@ def _shear(
     mob = subject.split("/")[0]
     found = ctx.mob_search_cost(mob)
     if found is None:
-        result.uncovered[f"缺生物密度:{mob}"] += 1
+        result.uncovered[f"缺生物密度({_short(mob)}):{record.item}"] += 1
         return None
     got = ctx.yield_per_trigger(
         source_type="shear",
@@ -61,6 +61,9 @@ def _shear(
             f"（搜索 {travel.value:.2f} TU + 剪 {gamedata.SHEAR_SECONDS:g}s）"
         ),
         source="loot_expectation:shear",
+        # 不传 condition：剪毛行按 `tools=present` 存，`yield_condition` 是空串时
+        # 归一化之后反而对不上。查不到就是 0，不猜。
+        yield_cv=cost_cv(ctx, subject, record.item, got.value),
     )
 
 
@@ -95,7 +98,7 @@ def _mob_interact(
         return None
     found = ctx.mob_search_cost(subject)
     if found is None:
-        result.uncovered[f"缺生物密度:{subject}"] += 1
+        result.uncovered[f"缺生物密度({_short(subject)}):{record.item}"] += 1
         return None
     travel, density = found
     result.bundle.record(f"mob:{subject}", density)
@@ -184,7 +187,9 @@ def _biome_mob_weighted(
     `_structure_mob_placed` → `_structure_mob_weighted` → `_raid_mob` → 这里。
     """
     made = 0
-    cycle = seconds(gamedata.NATURAL_SPAWN_SECONDS + gamedata.KILL_SECONDS)
+    # 等一只的周期与击杀并行：等待计时不会因为你在打怪而暂停，
+    # 所以整只耗时是两者的**大者**，不是和。
+    cycle = seconds(max(gamedata.NATURAL_SPAWN_SECONDS, gamedata.KILL_SECONDS))
     for biome, weight, total, category in ctx.biome_spawn_weights(mob):
         found = ctx.biome_search_cost(biome)
         if found is None:
@@ -214,8 +219,8 @@ def _biome_mob_weighted(
                 f"在 {_short(biome)} 等 {_short(mob)} 刷出来"
                 f"（占 {category or '同类'} 权重 {share * 100:.0f}%，"
                 f"平均打死 {kills:.1f} 只才出 1 只；{travel.detail} + "
-                f"{kills * gamedata.NATURAL_SPAWN_SECONDS:g}s 等待 + "
-                f"{kills * gamedata.KILL_SECONDS:g}s 击杀），"
+                f"{kills * max(gamedata.NATURAL_SPAWN_SECONDS, gamedata.KILL_SECONDS):g}s/只"
+                f"（等待与击杀取大者）），"
                 f"这只掉 {per_kill:g} 个"
             ),
             source="mob_spawn:biome",
@@ -272,14 +277,14 @@ def _mob(
             result.emit(scoop)
             made += 1
         if not made:
-            result.uncovered[f"缺生物密度:{mob}"] += 1
+            result.uncovered[f"缺生物密度({_short(mob)}):{record.item}"] += 1
         return None
     if record.family == "bridge/entity_behaviour":
         # 挤奶/取蜜：容器对生物或方块用一下，不是击杀。
         return _mob_interact(record, ctx, result)
     per_kill = _per_kill(record)
     if per_kill <= 0:
-        result.uncovered[f"缺每次掉落期望:{record.subject}"] += 1
+        result.uncovered[f"缺每次掉落期望({_short(record.subject)}):{record.item}"] += 1
         return None
     # `charged_creeper/<mob>` 的子表名就是实体 ID，但**表路径必须留着**——
     # 剥成 `creeper` 会和 `entities/creeper` 撞名（头颅因此查错表）。
@@ -297,6 +302,11 @@ def _mob(
         return _structure_mob(record, ctx, result, once_caps, lookup)
     travel, density = found
     result.bundle.record(f"mob:{lookup}", density)
+    # `loot_expectation` 的 `kill` 行用裸实体 ID（`minecraft:blaze`），而
+    # `record.subject` 是表路径（`minecraft:entities/blaze`），直接查一定落空。
+    loot_subject = record.stat_subject or record.subject
+    if "/" in loot_subject:
+        loot_subject = f"minecraft:{loot_subject.rpartition('/')[2]}"
     return Action(
         action_id=f"kill:{_short(record.item)}:{_short(lookup)}",
         item=record.item,
@@ -308,6 +318,9 @@ def _mob(
             f"每次给 {per_kill:g} 个"
         ),
         source="mob_density+loot_expectation",
+        # 稀有掉落（凋灵骷髅头 2.5%）的 `per_trigger_cv` 能到 6 以上，
+        # 不接方差的话这类来源的尾巴完全看不见。
+        yield_cv=cost_cv(ctx, loot_subject, record.item, per_kill),
     )
 
 
@@ -429,7 +442,7 @@ def _structure_mob(
     """
     per_kill = _per_kill(record)
     if per_kill <= 0:
-        result.uncovered[f"缺每次掉落期望:{mob}"] += 1
+        result.uncovered[f"缺每次掉落期望({_short(mob)}):{record.item}"] += 1
         return None
     made = _structure_mob_placed(record, ctx, result, once_caps, mob, per_kill)
     made += _structure_mob_weighted(record, ctx, result, once_caps, mob, per_kill)
@@ -443,7 +456,7 @@ def _structure_mob(
         # 要玩家满足某个状态才会出现（幻翼）。
         made += _special_mob(record, result, mob, per_kill)
     if not made:
-        result.uncovered[f"缺生物密度:{mob}"] += 1
+        result.uncovered[f"缺生物密度({_short(mob)}):{record.item}"] += 1
     return None
 
 
@@ -568,7 +581,8 @@ def _structure_mob_placed(
     placed = ctx.structure_mob_sources(mob)
     if not placed:
         return 0
-    waiting = seconds(gamedata.SPAWNER_WAIT_SECONDS + gamedata.KILL_SECONDS)
+    waiting = seconds(max(gamedata.SPAWNER_WAIT_SECONDS, gamedata.KILL_SECONDS))
+    trial_waiting = seconds(max(gamedata.TRIAL_SPAWNER_WAIT_SECONDS, gamedata.KILL_SECONDS))
     made = 0
     for structure, per_start, variant, kind in placed:
         cap = _ensure_capability(ctx, result, once_caps, structure, route="")
@@ -589,12 +603,19 @@ def _structure_mob_placed(
                 f"（每只 {per_kill:g} 个；行程 {travel_cost:.2f} TU + 打 {rounds * gamedata.KILL_SECONDS:g}s）"
             )
         else:
-            # 刷怪笼：无限刷，单价按「等一只 + 打一只」。
-            cost = waiting / per_kill
+            # 刷怪笼：无限刷，单价按「等一只」的周期（击杀并行在等待窗口里）。
+            # 两种笼子的周期差一个数量级，不能共用一个常量：`mob_spawner` 是
+            # 200–800 tick（25s），`trial_spawner` 是 20–160 tick（每次都补一批）。
+            if kind == "trial_spawner":
+                cost = trial_waiting / per_kill
+                cadence = f"每 {gamedata.TRIAL_SPAWNER_WAIT_SECONDS:g}s 补一批"
+            else:
+                cost = waiting / per_kill
+                cadence = f"每 {gamedata.SPAWNER_WAIT_SECONDS:g}s 刷一只"
             yields = 1.0
             label = (
                 f"在 {_short(variant)} 的刷怪笼边刷（{kind}，每处 {per_start:.2f} 个）"
-                f"：等 {gamedata.SPAWNER_WAIT_SECONDS:g}s + 打 {gamedata.KILL_SECONDS:g}s，"
+                f"：{cadence}（击杀并行在里面），"
                 f"每次掉 {per_kill:g} 个"
             )
         action = Action(
@@ -632,13 +653,19 @@ def _structure_mob_weighted(
 
     RA 的刷怪表只给相对权重，不给刷怪速率。权重占比 `w / W`（同 `category` 内）
     就是「刷出来的是它」的机率，所以要拿一只平均得打死 `W / w` 只。
-    每只按「等一只 + 打一只」计，与刷怪笼同一口径。
+    每只按「等一只 + 打一只」计。
+
+    **这里的等待不是刷怪笼**：结构刷怪表覆盖的是区域自然刷怪（下界要塞的
+    凋灵骷髅、海底神殿的远古守卫者、堡垒的岩浆怪），没有 200–800 tick 的
+    确定性延迟，受 mobcap 与光照影响，所以周期用 `NATURAL_SPAWN_SECONDS`，
+    与 `_biome_mob_weighted` 同一口径。
 
     这是 `monument` → 守卫者、`fortress` → 凋灵骷髅这类来源唯一的入口：
     它们的容器内容全空（H3），只能靠刷怪权重算。
     """
     made = 0
-    cycle = seconds(gamedata.SPAWNER_WAIT_SECONDS + gamedata.KILL_SECONDS)
+    # 等一只的周期与击杀并行，取大者；与群系刷怪退路同一口径。
+    cycle = seconds(max(gamedata.NATURAL_SPAWN_SECONDS, gamedata.KILL_SECONDS))
     for set_id, weight, total, category in ctx.structure_spawn_weights(mob):
         cap = _ensure_capability(ctx, result, once_caps, set_id, route="")
         requires: tuple[Requirement, ...] = ()
@@ -660,7 +687,8 @@ def _structure_mob_weighted(
             label=(
                 f"在 {_short(set_id)} 里等刷怪（{_short(mob)} 占 {category or '同类'}"
                 f" 权重的 {share * 100:.0f}%，平均打死 {kills:.2f} 只才出 1 只；"
-                f"行程 {travel_cost:.2f} TU + {kills * gamedata.SPAWNER_WAIT_SECONDS + kills * gamedata.KILL_SECONDS:.0f}s），"
+                f"行程 {travel_cost:.2f} TU + {kills * gamedata.NATURAL_SPAWN_SECONDS:g}s 等待"
+                f" + {kills * gamedata.KILL_SECONDS:g}s 击杀），"
                 f"这只掉 {per_kill:g} 个"
             ),
             source="mob_spawn:structure",

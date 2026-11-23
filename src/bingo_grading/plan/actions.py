@@ -28,6 +28,78 @@ MODES = (MODE_ONCE, MODE_PER_USE)
 # 所以照样建模成「某个动作的产出」。报告里靠这个前缀区分。
 CAPABILITY_PREFIX = "capability:"
 
+# `action_id` 的合法前缀（`"loot:villages"` 里的 `loot`）。
+#
+# 前缀不是装饰，三处逻辑按它分支：
+#
+# | 用它的地方 | 判什么 |
+# |---|---|
+# | `grade.ATOMIC_PREFIXES` | 一次调用能不能按件拆（开箱不能拆半次） |
+# | `Requirement.forbid` | 来源黑名单按前缀匹配 |
+# | `sources/actions/build.py` | 按前缀分类记账 |
+#
+# 拼错一个字母不会报错，只会让上面某个判断静默失效——所以这里列全，
+# 并用 `tests/test_action_prefixes.py` 钉住「代码里用到的都在表里」。
+ACTION_PREFIXES: tuple[str, ...] = (
+    # —— 采集与地点
+    "mine",
+    "loot",
+    "loot_block",
+    "brush",
+    "dig",
+    "harvest",
+    "sniffer",
+    "plant",
+    "grow",
+    "bloom",
+    "lay",
+    "bucket",
+    "fill",
+    "scoop",
+    "scoop_spawn",
+    "interact",
+    "shear",
+    "water",
+    "roam",
+    "travel",
+    "portal",
+    "end",
+    "capability",
+    "cast",
+    "igniter",
+    # —— 生物
+    "kill",
+    "spawner",
+    "haunt",
+    "raid",
+    "wither",
+    "dragon",
+    "special",
+    # —— 制造与变换
+    "craft",
+    "smelt",
+    "transmute",
+    "convert",
+    "wear",
+    "oxidize",
+    # 工具前置：`tool:craft:<item>`（最便宜那条）与 `tool:craft:<item>~2`（备选）
+    "tool",
+    # —— 交易与社交
+    "trade",
+    "gift",
+    "cat_gift",
+    "bonus",
+    "barter",
+    "train",
+    "fish",
+    # —— 模板绑定（陶片这类挂在模板 NBT 里的物品）
+    "bind",
+)
+
+# 运行时校验用。`tuple` 保留给测试与文档阅读，查找走集合。
+PREFIX_SET = frozenset(ACTION_PREFIXES)
+
+
 
 class ActionError(ValueError):
     """动作定义不合法。"""
@@ -116,10 +188,26 @@ class Action:
     # 「这个动作本身要做一次的一次性开销」。需求 n 件时只收一次，
     # 否则「挖 N 个矿」会把同一口竖井重挖 N 遍。
     overhead: tuple[tuple[str, float], ...] = ()
+    # 单次调用**有效主产出**的相对标准差（`sd / mean`）：只影响
+    # `Segment.cv` → `Curve.variance()` / `tail_cost()`，**不参与 `unit_cost`**。
+    # 0 = 当作确定量。目前能算出真值的只有 loot 表来源
+    # （`expect.variance / expect.per_item²`），其余一律留 0（无信息，不惩罚）。
+    yield_cv: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.action_id:
             raise ActionError("动作 ID 不能为空")
+        # 前缀白名单：拼错不会报错，只会让 `ATOMIC_PREFIXES` / `forbid` /
+        # 分类记账静默失效。所以在构造时就拦下来（含动态拼接的那种）。
+        #
+        # 不带冒号的 ID 不校验：真实代码里每个 ID 都带前缀（见
+        # `tests/test_action_prefixes.py` 的字面量扫描），裸名只出现在测试夹具里。
+        head, sep, _ = self.action_id.partition(":")
+        if sep and head not in PREFIX_SET:
+            raise ActionError(
+                f"动作 ID 的前缀未登记：{self.action_id!r}（前缀 {head!r}）；"
+                f"合法前缀见 `plan/actions.py` 的 `ACTION_PREFIXES`"
+            )
         if not self.item:
             raise ActionError(f"动作 {self.action_id} 的主产物不能为空")
         if not math.isfinite(self.cost) or self.cost < 0:
@@ -156,6 +244,10 @@ class Action:
                 raise ActionError(
                     f"动作 {self.action_id} 的固定成本不能为负：{name} = {amount}"
                 )
+        if not math.isfinite(self.yield_cv) or self.yield_cv < 0:
+            raise ActionError(
+                f"动作 {self.action_id} 的相对标准差必须有限且非负：{self.yield_cv}"
+            )
         seen: set[str] = set()
         for req in self.requires:
             if req.item in seen:
@@ -243,6 +335,8 @@ class Action:
             }
         if self.overhead:
             out["overhead"] = [[name, weight(amount)] for name, amount in self.overhead]
+        if self.yield_cv:
+            out["yield_cv"] = weight(self.yield_cv)
         return out
 
     @classmethod
@@ -269,6 +363,9 @@ class Action:
             race=raw.get("race"),
             equivalents=dict(raw.get("equivalents") or {}),
             overhead=tuple((name, amount) for name, amount in raw.get("overhead") or ()),
+            # 新字段必须显式透传：漏了的话落盘再读回来方差就静默归零
+            # （`forbid` 当年就是这么丢的）。
+            yield_cv=raw.get("yield_cv", 0.0),
         )
 
 

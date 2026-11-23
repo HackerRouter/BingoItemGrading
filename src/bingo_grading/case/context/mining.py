@@ -33,10 +33,9 @@ class MiningMixin:
             return self._mining_cache[cache_key]
         rows = [
             row
-            for row in self.store.rows.values()
-            if row.stat_type in ("ore_density", "block_density")
-            and row.subject == subject
-            and row.dimension == dimension
+            for stat_type in ("ore_density", "block_density")
+            for row in self.store.of(stat_type, subject)
+            if row.dimension == dimension
         ]
         if not rows:
             self._mining_cache[cache_key] = (None, None)
@@ -148,10 +147,8 @@ class MiningMixin:
         dimension = dimension or self.dimension
         rows = [
             row
-            for row in self.store.rows.values()
-            if row.stat_type == "block_density"
-            and row.subject == block
-            and row.dimension == dimension
+            for row in self.store.of("block_density", block)
+            if row.dimension == dimension
         ]
         if not rows:
             return None  # type: ignore[return-value]
@@ -243,10 +240,8 @@ class MiningMixin:
         dimension = dimension or self.dimension
         rows = [
             row
-            for row in self.store.rows.values()
-            if row.stat_type == "block_density"
-            and row.subject == block
-            and row.dimension == dimension
+            for row in self.store.of("block_density", block)
+            if row.dimension == dimension
         ]
         if not rows:
             return None  # type: ignore[return-value]
@@ -324,10 +319,8 @@ class MiningMixin:
         """
         rows = [
             row
-            for row in self.store.rows.values()
-            if row.stat_type == "ore_exposure"
-            and row.subject == block
-            and row.dimension == dimension
+            for row in self.store.of("ore_exposure", block)
+            if row.dimension == dimension
         ]
         if not rows:
             return None
@@ -349,10 +342,8 @@ class MiningMixin:
         # 下潜深度：该矿密度最高那一段的顶端。
         depth = 0
         sections: list[dict] = []
-        for row in self.store.rows.values():
-            if row.stat_type != "ore_density":
-                continue
-            if row.subject != block or row.dimension != dimension:
+        for row in self.store.of("ore_density", block):
+            if row.dimension != dimension:
                 continue
             sections.extend((row.value.get("by_section") or {}).values())
         if sections:

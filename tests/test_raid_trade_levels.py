@@ -71,7 +71,7 @@ def test_raid_whole_cost_does_not_shrink_by_sharing_one_event(ctx: CaseContext) 
     built = actions.build(ctx, "minecraft:totem_of_undying")
     aset = built.actionset()
     solved = solve(aset, "minecraft:totem_of_undying", 1.0)
-    one, action_id, _ = grade.best_whole_cost(
+    one, action_id, _, _ = grade.best_whole_cost(
         aset, solved.curves, "minecraft:totem_of_undying", 1.0
     )
     assert one is not None

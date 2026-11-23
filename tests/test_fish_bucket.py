@@ -47,7 +47,7 @@ def test_scoop_beats_trading_for_cod(ctx: CaseContext) -> None:
     built = actions.build(ctx, "minecraft:cod_bucket")
     aset = built.actionset()
     solved = solve(aset, "minecraft:cod_bucket", 1.0)
-    cost, action_id, _ = grade.best_whole_cost(
+    cost, action_id, _, _ = grade.best_whole_cost(
         aset, solved.curves, "minecraft:cod_bucket", 1.0
     )
     assert cost is not None

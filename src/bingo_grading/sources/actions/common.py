@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -9,6 +10,31 @@ from bingo_grading import paths
 from bingo_grading import gamedata
 from bingo_grading.case.sources import seconds
 from bingo_grading.sources.knowledge import load_structure_maps
+
+
+def cost_cv(
+    ctx,
+    subject: str,
+    item: str,
+    expected: float,
+    *,
+    condition: str = "tools=tools=present",
+) -> float:
+    """战利品来源的**成本**相对标准差，喂给 `Action.yield_cv`。
+
+    `loot_expectation.per_trigger_cv` 是「一次触发产出的波动」（`s/μ`），而
+    `Segment.cv` 要的是「凑够 1 件的成本波动」。凑 `n` 件所需的触发次数本身
+    是随机的，renewal 近似下 `Var(n 件) = n·c²·s²/μ³`；换算到单价 `c/μ` 上
+    正好是 `(s/μ)·√μ`，所以这里要乘 `√expected`。
+
+    这个公式与需求量无关（`n` 只在消费者那边乘），所以批量来源（μ > 1）
+    也能用：μ=22 时 `cv` 大，但 `unit = c/μ` 很小，两者相抵消，n=1 时
+    方差只占成本的 1% 量级——与「跑一趟就够了」的直觉一致。
+    真正的陷阱在消费端：不能用整次取整后的 `calls` 去乘（见 `grade.best_whole_cost`）。
+    """
+    if expected <= 0:
+        return 0.0
+    return ctx.loot_cv(subject, item, condition=condition) * math.sqrt(expected)
 
 
 

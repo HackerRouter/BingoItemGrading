@@ -99,6 +99,9 @@ class TableExpectation:
 
     table: str
     per_item: dict[str, float] = field(default_factory=dict)
+    # 每件物品在一次开箱里的方差（与 `per_item` 同键）；供后续方差链路用。
+    # **不进 `as_dict`**：那个结构是落盘格式，加字段会改变 `facts.jsonl`。
+    variance: dict[str, float] = field(default_factory=dict)
     assumptions: list[str] = field(default_factory=list)
     unsupported: list[str] = field(default_factory=list)
     # 期望进入箱子的物品总数（含未点名的）。
@@ -413,6 +416,59 @@ def _expected_count(functions: tuple[dict, ...], ctx: _Ctx) -> float:
     return count
 
 
+def _spread(value: object) -> float:
+    """`count` 分布的方差。只认 uniform / binomial，其余按 0（常数）。
+
+    注意这里用**原始**区间算方差：`_number` 会把负数下界 clamp 到 0，
+    但 clamp 后的真实方差需要截断分布的推导，收益不值这个复杂度。
+    负数区间只出现在 6 张表上（见 `uniform{min<0}` 的记忆），
+    这些表的方差会略微高估——记在 assumptions 里。
+    """
+    if not isinstance(value, dict):
+        return 0.0
+    kind = str(value.get("type") or "")
+    if kind.endswith("uniform"):
+        low = value.get("min_inclusive", value.get("min"))
+        high = value.get("max_inclusive", value.get("max"))
+        if isinstance(low, (int, float)) and isinstance(high, (int, float)):
+            span = float(high) - float(low) + 1.0  # 离散均匀的取值个数
+            return max(0.0, (span * span - 1.0) / 12.0)
+        return 0.0
+    if kind.endswith("binomial"):
+        n, p = value.get("n"), value.get("p")
+        if isinstance(n, (int, float)) and isinstance(p, (int, float)):
+            return float(n) * float(p) * (1.0 - float(p))
+        return 0.0
+    return 0.0
+
+
+def _count_variance(functions: tuple[dict, ...], ctx: _Ctx) -> float:
+    """一套 modifier 之后的数量方差，与 `_expected_count` 平行。
+
+    多个 `set_count` 串联按「后一个覆盖前一个」处理（与均值口径一致）。
+    """
+    mean = 1.0
+    variance = 0.0
+    for modifier in functions:
+        kind = _fn_type(modifier)
+        if kind != "minecraft:set_count":
+            continue
+        value = modifier.get("count")
+        new_mean = _number(value)
+        if new_mean is None:
+            continue
+        new_variance = _spread(value)
+        applied = _modifier_condition_probability(modifier, ctx)
+        # 条件成立用新分布、不成立保持原值 → 混合分布的二阶矩
+        mean_second = variance + mean * mean
+        new_second = new_variance + new_mean * new_mean
+        mixed_first = mean * (1.0 - applied) + new_mean * applied
+        mixed_second = mean_second * (1.0 - applied) + new_second * applied
+        mean = mixed_first
+        variance = max(0.0, mixed_second - mixed_first * mixed_first)
+    return variance
+
+
 def _tag_members(entry: Entry, ctx: _Ctx) -> tuple[str, ...]:
     """`tag` 条目展开成物品列表。战利品表的标签在 `minecraft:item` 注册表下。"""
     tag = entry.tag_ref
@@ -449,11 +505,16 @@ def _entry_contribution(
     tables: LootTableSet,
     depth: int,
     apply_conditions: bool = True,
+    var: dict[str, float] | None = None,
+    select_prob: float = 1.0,
 ) -> tuple[dict[str, float], float]:
     """一个条目在「被选中概率为 share」时的贡献：`(每物品期望, 总件数)`。
 
     `apply_conditions=False` 只用于 `alternatives` 的子条目：那个分支的概率
     已经由父层算过，再乘一遍就变成平方了。
+
+    `var` 非空时同时累计方差：`share` 是期望次数，`select_prob` 是单次 roll
+    选中该条目的概率，二项项 `share·(1-p)·E[X]²` 由它决定。
     """
     out: dict[str, float] = {}
     total = 0.0
@@ -473,9 +534,15 @@ def _entry_contribution(
         return out, total
 
     if entry.kind == "item" and entry.name:
-        amount = share * _expected_count(entry.functions, ctx)
+        mean_count = _expected_count(entry.functions, ctx)
+        amount = share * mean_count
         _add(out, entry.name, amount)
         total += amount
+        if var is not None:
+            # N ~ Binomial(rolls, p)：Var = share·Var(X) + share·(1-p)·E[X]²
+            var_add = share * _count_variance(entry.functions, ctx)
+            var_add += share * (1.0 - select_prob) * mean_count * mean_count
+            _add(var, entry.name, max(0.0, var_add))
         return out, total
 
     if entry.kind == "loot_table":
@@ -485,17 +552,29 @@ def _entry_contribution(
             if nested is None:
                 ctx.skip(f"嵌套表不存在：{name}")
                 return out, total
-            nested_out, nested_total = _table_contribution(nested, ctx, tables, depth + 1)
+            child_var: dict[str, float] = {}
+            nested_out, nested_total = _table_contribution(
+                nested, ctx, tables, depth + 1, var=child_var if var is not None else None
+            )
             for item, value in nested_out.items():
                 _add(out, item, value * share)
+            if var is not None:
+                for item, value in child_var.items():
+                    _add(var, item, value * share)
             return out, nested_total * share
         inline = entry.inline_table
         if inline is not None:
             # `equipment/*` 把表直接写在 `value` 里，没有表 ID。
             nested = normalize_table(inline, "<inline>")
-            nested_out, nested_total = _table_contribution(nested, ctx, tables, depth + 1)
+            child_var: dict[str, float] = {}
+            nested_out, nested_total = _table_contribution(
+                nested, ctx, tables, depth + 1, var=child_var if var is not None else None
+            )
             for item, value in nested_out.items():
                 _add(out, item, value * share)
+            if var is not None:
+                for item, value in child_var.items():
+                    _add(var, item, value * share)
             return out, nested_total * share
         ctx.skip("嵌套表条目缺表 ID")
         return out, total
@@ -503,7 +582,9 @@ def _entry_contribution(
     if entry.kind in ("group", "sequence"):
         # 全部子条目都给，按权重分摊没有意义，各自按 share 计。
         for child in entry.children:
-            child_out, child_total = _entry_contribution(child, share, ctx, tables, depth + 1)
+            child_out, child_total = _entry_contribution(
+                child, share, ctx, tables, depth + 1, var=var, select_prob=select_prob
+            )
             for item, value in child_out.items():
                 _add(out, item, value)
             total += child_total
@@ -521,7 +602,8 @@ def _entry_contribution(
             ctx.assume("互斥分支只按主体属性区分，按「目标就是那一种」各计 1.0")
             for child in entry.children:
                 child_out, child_total = _entry_contribution(
-                    child, share, ctx, tables, depth + 1, apply_conditions=False
+                    child, share, ctx, tables, depth + 1, apply_conditions=False,
+                    var=var, select_prob=1.0,
                 )
                 for item, value in child_out.items():
                     _add(out, item, value)
@@ -535,7 +617,8 @@ def _entry_contribution(
             effective = remaining * probability
             if effective:
                 child_out, child_total = _entry_contribution(
-                    child, effective, ctx, tables, depth + 1, apply_conditions=False
+                    child, effective, ctx, tables, depth + 1, apply_conditions=False,
+                    var=var, select_prob=probability,
                 )
                 for item, value in child_out.items():
                     _add(out, item, value)
@@ -551,10 +634,16 @@ def _entry_contribution(
         if not members:
             ctx.skip(f"tag 条目未展开：{entry.tag_ref}")
             return out, total
-        amount = share / len(members) * _expected_count(entry.functions, ctx)
+        mean_count = _expected_count(entry.functions, ctx)
+        amount = share / len(members) * mean_count
         for member in members:
             _add(out, member, amount)
             total += amount
+            if var is not None:
+                # 成员间也是二项分布：单成员被选中的概率 ~ 1/len(members)
+                var_add = (share / len(members)) * _count_variance(entry.functions, ctx)
+                var_add += (share / len(members)) * (1.0 - 1.0 / len(members)) * mean_count * mean_count
+                _add(var, member, max(0.0, var_add))
         return out, total
 
     if entry.kind == "dynamic":
@@ -570,6 +659,7 @@ def _table_contribution(
     ctx: _Ctx,
     tables: LootTableSet,
     depth: int = 0,
+    var: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], float]:
     out: dict[str, float] = {}
     total = 0.0
@@ -584,8 +674,12 @@ def _table_contribution(
         if not pool.entries or weights <= 0:
             continue
         for entry in pool.entries:
-            share = rolls * pool_probability * (entry.weight / weights)
-            entry_out, entry_total = _entry_contribution(entry, share, ctx, tables, depth)
+            weight_share = entry.weight / weights
+            share = rolls * pool_probability * weight_share
+            entry_out, entry_total = _entry_contribution(
+                entry, share, ctx, tables, depth,
+                var=var, select_prob=pool_probability * weight_share,
+            )
             for item, value in entry_out.items():
                 _add(out, item, value)
             total += entry_total
@@ -608,7 +702,8 @@ def expect(
     """
     table = tables.require(table_id)
     ctx = _Ctx(tool_probability=tool_probability, tags=tags)
-    per_item, total = _table_contribution(table, ctx, tables)
+    variance: dict[str, float] = {}
+    per_item, total = _table_contribution(table, ctx, tables, var=variance)
     # 负期望在物理上不可能。它来自 `set_count` 的负数下界被当成均值
     # （`brown_mushroom_block` 的表就会算出 -2 个蘑菇），如果放任它流下去，
     # 下游会生成「产出 -2 个」的动作并直接抛错。这里置零并记账，
@@ -620,6 +715,7 @@ def expect(
     return TableExpectation(
         table=table_id,
         per_item=per_item,
+        variance={item: value for item, value in variance.items() if item in per_item},
         assumptions=sorted(ctx.assumptions),
         unsupported=sorted(ctx.unsupported),
         total_items=total,

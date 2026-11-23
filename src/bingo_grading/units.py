@@ -49,6 +49,11 @@ TIER_REPRESENTATIVE: dict[int, float] = {
 FREE_COVERAGE: dict[str, float] = {"low": 0.2, "medium": 0.5, "high": 0.8}
 
 # `variance_penalty` 三档系数。
+#
+# **退路，不是主路径**（2026-11-22 起）：方差维度已由 `plan` 的二阶矩算出来，
+# 评分走 `max(cost_score, tail_score)`（见 `grade.row_of`）。这三档是拍的系数，
+# 只在拿不到方差（来源没有 `yield_cv`）时才会用到，用它必须在报告里标 `calibration`。
+# 当前生产代码没有调用者，保留是为了「没有二阶矩的旧数据」还有据可依。
 VARIANCE_PENALTY: dict[str, float] = {"low": 1.0, "medium": 1.2, "high": 1.5}
 
 # 概率 → 方差档位。按概率从高到低匹配，第一项命中即返回。
