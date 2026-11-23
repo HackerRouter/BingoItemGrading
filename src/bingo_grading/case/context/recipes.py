@@ -87,6 +87,7 @@ class RecipesMixin:
     ) -> tuple[list[str], str]:
         """全部最弱合格工具（同级可能有多把，如石镐与铜镐），以及出处说明。
 
+        返回上游原序；要「实际用哪一把」走 `harvest_tool()`，那里会避开铜制工具。
         没有工具要求或数据缺失时返回 `([], "")`。
         """
         resolved = paths.harvest_facts(pack or self.pack_version())
@@ -113,11 +114,18 @@ class RecipesMixin:
 
         数据来自 RA 导出的 `harvest.jsonl`（`minecraft:tool` 组件 +
         `needs_*_tool` 标签）。没有工具要求或数据缺失时返回 `None`。
+
+        同级有多把时避开铜制工具：`harvest.jsonl` 对 stone 级方块同时给出
+        `copper_pickaxe` 与 `stone_pickaxe`，而铜镐要先把铜挖出来才做得成，
+        拿它当前置会让 `copper_pickaxe ← copper_ore ← copper_pickaxe` 成环，
+        整条挖矿路线被抬到箱子路线之上。实际开矿时没人会专门做铜镐，
+        石镐挖得动同样的方块。其余候选保持上游顺序。
         """
         tools, detail = self.harvest_tools(block, pack=pack)
         if not tools:
             return None
-        return tools[0], detail
+        affordable = [tool for tool in tools if "copper_" not in tool]
+        return (affordable or tools)[0], detail
 
 
     def harvest_level(self, block: str, *, pack: str | None = None) -> str | None:

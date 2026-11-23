@@ -58,6 +58,15 @@ def test_soft_blocks_have_no_requirement(ctx: CaseContext) -> None:
     assert ctx.harvest_tool("minecraft:stone") is None
 
 
+def test_stone_level_blocks_prefer_stone_pickaxe(ctx: CaseContext) -> None:
+    """铜镐与石镐同级时不用铜镐：铜要先挖出来，拿它当前置会成环。"""
+    tools, _ = ctx.harvest_tools("minecraft:copper_ore")
+    assert "minecraft:copper_pickaxe" in tools  # 数据层保留上游原序
+    found = ctx.harvest_tool("minecraft:copper_ore")
+    assert found is not None
+    assert found[0] == "minecraft:stone_pickaxe"
+
+
 def test_every_row_is_well_formed() -> None:
     rows = [
         json.loads(line)
