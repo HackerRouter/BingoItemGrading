@@ -83,6 +83,23 @@ class Bin:
 
 
 @dataclass(frozen=True)
+class CostBin:
+    """一个代价箱：`[low, high)`，按维度计数。
+
+    横轴是**原始整次成本**（TU）的对数箱，不经过 `score` 换算——档位算法
+    还在重定，直方图不该依赖它。每翻倍分 `per_octave` 箱（默认 4，即 ×1.19）。
+    """
+
+    low: float
+    high: float
+    counts: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        return sum(self.counts.values())
+
+
+@dataclass(frozen=True)
 class Meta:
     """报告头：数据从哪来、总共多少件。"""
 
@@ -90,6 +107,12 @@ class Meta:
     items: int
     scored: int
     demand: float = 1.0
+    axis: str = "score"
+    per_octave: int = 4
+    skip_empty: bool = True
+    # 各维度最便宜的物品：`(维度标签, 物品, 整次成本)`。直方图的柱子按区间计数，
+    # 同箱内的物品无法与门槛线比较，这个表给出精确值。
+    lowest: tuple[tuple[str, str, float], ...] = ()
 
     @property
     def unscored(self) -> int:
@@ -139,7 +162,51 @@ def build_bins(rows, dimensions: dict[str, str]) -> list[Bin]:
     ]
 
 
-def totals(bins: list[Bin]) -> dict[str, int]:
+def _bounds_of_index(index: int, per_octave: int) -> tuple[float, float]:
+    return 2 ** (index / per_octave), 2 ** ((index + 1) / per_octave)
+
+
+def _bin_of(cost: float, per_octave: int) -> int:
+    """成本 → 箱序号（每翻倍 `per_octave` 箱）。"""
+    return math.floor(math.log2(cost) * per_octave)
+
+
+def build_cost_bins(
+    rows,
+    dimensions: dict[str, str],
+    *,
+    per_octave: int = 4,
+    skip_empty: bool = True,
+) -> list[CostBin]:
+    """按**整次成本**的对数箱清点：每翻倍分 `per_octave` 箱（默认 4，即 ×1.19）。
+
+    默认略去空箱：1413 件铺在对数轴上时，空箱会把主分布挤到左边、柱子细到看不清；
+    每个箱的区间写在横轴上，所以跳过不影响读图。
+    没有整次成本的物品不进直方图（`Meta.unscored` 单独报）。
+    """
+    if per_octave < 1:
+        raise ValueError(f"per_octave 必须是正整数，收到 {per_octave!r}")
+    tally: dict[int, dict[str, int]] = {}
+    for row in rows:
+        cost = row.whole_cost_tu
+        if cost is None or not math.isfinite(cost) or cost <= 0:
+            continue
+        index = _bin_of(cost, per_octave)
+        bucket = tally.setdefault(index, {key: 0 for key in DIMENSIONS})
+        bucket[dimensions.get(row.item, EARTH)] += 1
+    if not tally:
+        return []
+    out: list[CostBin] = []
+    for index in range(min(tally), max(tally) + 1):
+        counts = tally.get(index) or {key: 0 for key in DIMENSIONS}
+        if skip_empty and not any(counts.values()):
+            continue
+        low, high = _bounds_of_index(index, per_octave)
+        out.append(CostBin(low=low, high=high, counts=counts))
+    return out
+
+
+def totals(bins: list[Bin] | list[CostBin]) -> dict[str, int]:
     out = {key: 0 for key in DIMENSIONS}
     for item in bins:
         for key in DIMENSIONS:
@@ -164,37 +231,61 @@ def _split(counts: dict[str, int], width: int) -> list[int]:
     return parts
 
 
-def render_text(bins: list[Bin], marks: list[Mark], meta: Meta, *, width: int = 36) -> str:
-    """终端直方图：一行一档，条形用维度字符拼，门槛线挂在对应档的末尾。"""
+def _fmt_tu(value: float) -> str:
+    """箱边界的人读格式：小数位随量级收，避免 0.5000000001 这种噪声。"""
+    if value >= 100:
+        return f"{value:.0f}"
+    if value >= 10:
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def render_text(bins: list[Bin] | list[CostBin], marks: list[Mark], meta: Meta, *, width: int = 36) -> str:
+    """终端直方图：一行一箱，条形用维度字符拼，门槛线挂在对应箱的行尾。
+
+    `meta.axis="cost"` 时横轴是整次成本的对数箱，否则沿用旧的分数档。
+    """
     if not bins:
         return "（没有可统计的物品）"
     biggest = max(item.total for item in bins)
     per_dim = totals(bins)
+    cost_axis = meta.axis == "cost"
+    title = "代价分布" if cost_axis else "难度分布"
     lines = [
-        f"难度分布 · {meta.pack} · {meta.items} 件"
+        f"{title} · {meta.pack} · {meta.items} 件"
         f"（有分数 {meta.scored}，算不出 {meta.unscored}）",
         "",
-        f"{'分数':>4}  {'整次成本':<16}{'条形':<{width}}  {'合计':>5}  "
+        f"{'箱':>4}  {'整次成本':<16}{'条形':<{width}}  {'合计':>5}  "
         f"{'主世界':>5}{'下界':>5}{'末地':>5}",
     ]
-    for item in bins:
+    for index, item in enumerate(bins):
         span = width if biggest <= 0 else max(1 if item.total else 0, round(item.total / biggest * width))
         parts = _split(item.counts, span)
         bar = "".join(
-            DIM_CHAR[key] * parts[index] for index, key in enumerate(DIMENSIONS)
+            DIM_CHAR[key] * parts[slot] for slot, key in enumerate(DIMENSIONS)
         )
-        span_text = (
-            f"<{item.high:.2f}"
-            if item.score == 0
-            else f"{item.low:.2f}~{item.high:.2f}"
-        )
+        if cost_axis:
+            span_text = f"{_fmt_tu(item.low)}~{_fmt_tu(item.high)}"
+            lead = f"{index:>4}"
+        else:
+            span_text = (
+                f"<{item.high:.2f}"
+                if item.score == 0
+                else f"{item.low:.2f}~{item.high:.2f}"
+            )
+            lead = f"{item.score:>4}"
         tail = ""
         for mark in marks:
-            if item.score - 0.5 <= mark.score < item.score + 0.5:
+            hit = (
+                item.low <= mark.cost < item.high
+                if cost_axis
+                else item.score - 0.5 <= mark.score < item.score + 0.5
+            )
+            if hit:
                 tail = f"   <-- {mark.label} {mark.cost:.2f} TU"
                 break
         lines.append(
-            f"{item.score:>4}  {span_text:<16}{bar:<{width}}  {item.total:>5}  "
+            f"{lead}  {span_text:<16}{bar:<{width}}  {item.total:>5}  "
             f"{item.counts.get(EARTH, 0):>5}{item.counts.get(NETHER, 0):>5}"
             f"{item.counts.get(END, 0):>5}{tail}"
         )
@@ -205,7 +296,7 @@ def render_text(bins: list[Bin], marks: list[Mark], meta: Meta, *, width: int = 
             f"{DIM_CHAR[key]} {DIM_LABEL[key]} {per_dim[key]}"
             for key in DIMENSIONS
         )
-        + "    <-- 该档内有一条门槛线"
+        + "    <-- 该箱内有一条门槛线"
     )
     return "\n".join(lines)
 
@@ -217,14 +308,55 @@ def _esc(text: str) -> str:
     return html.escape(str(text), quote=True)
 
 
-def render_svg(bins: list[Bin], marks: list[Mark], *, width: int = 1180) -> str:
-    """堆积柱状 SVG。横轴是分数档，纵轴是件数，竖线是门槛代价。"""
+@dataclass(frozen=True)
+class _XAxis:
+    """直方图横坐标的唯一换算入口：柱子、标签、门槛线都走这里。
+
+    横轴是「非空箱序列」：每个箱占一个 `step`，按箱序号定位。成本值必须先
+    映射到所属箱、再按箱内对数比例插值——空箱略去后直接用全局 log2 会偏若干档。
+    分数轴（旧的 `Bin`）每个档同样占一个 `step`，命中值落在档中心。
+    """
+
+    left: float
+    step: float
+    cost_bins: tuple[CostBin, ...] = ()
+
+    def x(self, position: float) -> float:
+        """箱序号单位的连续坐标 → SVG x。"""
+        return self.left + position * self.step
+
+    def bin_left(self, index: int) -> float:
+        return self.x(index)
+
+    def bin_center(self, index: int) -> float:
+        return self.x(index + 0.5)
+
+    def at_cost(self, cost: float) -> float | None:
+        """成本 → SVG x；不在任何箱内时返回 `None`。"""
+        for index, item in enumerate(self.cost_bins):
+            if item.low <= cost < item.high:
+                span = math.log2(item.high) - math.log2(item.low)
+                frac = (math.log2(cost) - math.log2(item.low)) / span
+                return self.x(index + frac)
+        return None
+
+    def at_score(self, score: float) -> float:
+        return self.x(score + 0.5)
+
+
+def render_svg(
+    bins: list[Bin] | list[CostBin], marks: list[Mark], meta: Meta, *, width: int = 1180
+) -> str:
+    """堆积柱状 SVG：每箱一根柱，三个维度自下而上堆叠，竖线是门槛代价。
+
+    `meta.axis="cost"` 时横轴是整次成本的对数箱，否则沿用分数档。
+    """
     if not bins:
         return ""
     rows = len(bins)
-    top, bottom = 64, 132
+    top, bottom = 64, 150
     left, right = 78, 30
-    height = 660
+    height = 680
     plot_w = width - left - right
     plot_h = height - top - bottom
     step = plot_w / rows
@@ -232,15 +364,15 @@ def render_svg(bins: list[Bin], marks: list[Mark], *, width: int = 1180) -> str:
     biggest = max(item.total for item in bins)
     # 顶部留 8% 空隙，否则 495/500 的柱子看起来是贴着顶的。
     ceiling = max(10, math.ceil(biggest * 1.08 / 50) * 50)
-    # 档数多（新口径 30 档）时隔一档标一次横轴，否则字会叠。
+    cost_axis = meta.axis == "cost"
     label_every = 1 if rows <= 14 else 2
 
     def y(value: float) -> float:
         return top + plot_h * (1 - value / ceiling)
 
-    def x(score: float) -> float:
-        """横轴坐标：档位 `score` 的柱子左边界。"""
-        return left + score * step
+    axis = _XAxis(
+        left=left, step=step, cost_bins=tuple(bins) if cost_axis else ()
+    )
 
     parts: list[str] = []
     # 横向网格
@@ -257,58 +389,76 @@ def render_svg(bins: list[Bin], marks: list[Mark], *, width: int = 1180) -> str:
             f'fill="#8a9099" font-size="12">{value:.0f}</text>'
         )
 
-    # 柱
-    for item in bins:
-        base = x(item.score) + (step - bar_w) / 2
+    # 每箱一根柱：三个维度自下而上堆叠。
+    for index, item in enumerate(bins):
+        base = axis.bin_left(index) + (step - bar_w) / 2
+        detail = (
+            f'{_fmt_tu(item.low)}~{_fmt_tu(item.high)} TU：共 {item.total} 件'
+            f'（主世界 {item.counts.get(EARTH, 0)}、'
+            f'下界后 {item.counts.get(NETHER, 0)}、'
+            f'末地后 {item.counts.get(END, 0)}）'
+        )
+        parts.append(f"<g><title>{_esc(detail)}</title>")
         cursor = 0
-        for key in DIMENSIONS:
-            count = item.counts.get(key, 0)
+        for dim in DIMENSIONS:
+            count = item.counts.get(dim, 0)
             if count <= 0:
                 continue
             high = y(cursor + count)
             low = y(cursor)
             parts.append(
                 f'<rect x="{base:.1f}" y="{high:.1f}" width="{bar_w:.1f}" '
-                f'height="{low - high:.1f}" fill="{DIM_COLOR[key]}" '
-                f'stroke="#ffffff" stroke-width="0.6"/>'
+                f'height="{low - high:.1f}" fill="{DIM_COLOR[dim]}" '
+                f'stroke="#ffffff" stroke-width="0.5"/>'
             )
-            if count >= biggest * 0.05:
-                parts.append(
-                    f'<text x="{base + bar_w / 2:.1f}" y="{(high + low) / 2 + 4:.1f}" '
-                    f'text-anchor="middle" fill="#ffffff" font-size="11" '
-                    f'font-weight="600">{count}</text>'
-                )
             cursor += count
-        parts.append(
-            f'<title>{item.score} 分：共 {item.total} 件'
-            f'（主世界 {item.counts.get(EARTH, 0)}、'
-            f'下界后 {item.counts.get(NETHER, 0)}、'
-            f'末地后 {item.counts.get(END, 0)}）</title>'
-        )
-        # 横轴：分数、成本区间、时长。档数多时隔档标，否则字会叠在一起。
-        if item.score % label_every:
-            continue
-        center = base + bar_w / 2
-        parts.append(
-            f'<text x="{center:.1f}" y="{top + plot_h + 24}" text-anchor="middle" '
-            f'fill="#33383d" font-size="13" font-weight="600">{item.score}</text>'
-        )
-        span = f"&lt;{item.high:.2f}" if item.score == 0 else f"{item.low:.2f}~{item.high:.2f}"
-        parts.append(
-            f'<text x="{center:.1f}" y="{top + plot_h + 41}" text-anchor="middle" '
-            f'fill="#8a9099" font-size="10">{span}</text>'
-        )
-        # 时长取该档**上界**：读作「这一档的东西最多花这么久」。
-        parts.append(
-            f'<text x="{center:.1f}" y="{top + plot_h + 56}" text-anchor="middle" '
-            f'fill="#a5abb2" font-size="10">{_duration(item.high)}</text>'
-        )
+        if item.total >= biggest * 0.06 and bar_w >= 6:
+            parts.append(
+                f'<text x="{base + bar_w / 2:.1f}" y="{y(item.total) + 12:.1f}" '
+                f'text-anchor="middle" fill="#33383d" font-size="10" '
+                f'font-weight="600">{item.total}</text>'
+            )
+        parts.append("</g>")
 
-    # 门槛竖线
-    for mark in marks:
-        if not (bins[0].score - 0.5 <= mark.score <= bins[-1].score + 0.5):
+        # 横轴：对数箱较密，隔箱标；上行写箱上界，下面是时长。
+        if index % label_every:
             continue
-        line_x = left + (mark.score + 0.5) * step
+        center = axis.bin_center(index)
+        if cost_axis:
+            parts.append(
+                f'<text x="{center:.1f}" y="{top + plot_h + 22}" text-anchor="middle" '
+                f'fill="#33383d" font-size="12" font-weight="600">'
+                f'≤{_fmt_tu(item.high)}</text>'
+            )
+            parts.append(
+                f'<text x="{center:.1f}" y="{top + plot_h + 38}" text-anchor="middle" '
+                f'fill="#a5abb2" font-size="10">{_duration(item.high)}</text>'
+            )
+        else:
+            parts.append(
+                f'<text x="{center:.1f}" y="{top + plot_h + 24}" text-anchor="middle" '
+                f'fill="#33383d" font-size="13" font-weight="600">{item.score}</text>'
+            )
+            span = f"&lt;{item.high:.2f}" if item.score == 0 else f"{item.low:.2f}~{item.high:.2f}"
+            parts.append(
+                f'<text x="{center:.1f}" y="{top + plot_h + 41}" text-anchor="middle" '
+                f'fill="#8a9099" font-size="10">{span}</text>'
+            )
+            parts.append(
+                f'<text x="{center:.1f}" y="{top + plot_h + 56}" text-anchor="middle" '
+                f'fill="#a5abb2" font-size="10">{_duration(item.high)}</text>'
+            )
+
+    # 门槛竖线：成本轴按 log2 连续定位，分数轴按档中心定位。
+    for mark in marks:
+        if cost_axis:
+            line_x = axis.at_cost(mark.cost)
+            if line_x is None:
+                continue
+        else:
+            if not (bins[0].score - 0.5 <= mark.score <= bins[-1].score + 0.5):
+                continue
+            line_x = axis.at_score(mark.score)
         parts.append(
             f'<line x1="{line_x:.1f}" y1="{top - 14}" x2="{line_x:.1f}" '
             f'y2="{top + plot_h}" stroke="{mark.color}" stroke-width="2" '
@@ -325,12 +475,24 @@ def render_svg(bins: list[Bin], marks: list[Mark], *, width: int = 1180) -> str:
         f'<line x1="{left}" y1="{axis_y}" x2="{left + plot_w}" y2="{axis_y}" '
         f'stroke="#c6ccd2" stroke-width="1.5"/>'
     )
+    if cost_axis:
+        axis_note = (
+            "整次成本（TU，对数刻度：每箱 ×"
+            f"{2 ** (1 / meta.per_octave):.2f}）"
+            "　·　上行是箱上界　·　下行是约合时长"
+        )
+    else:
+        axis_note = (
+            "分数（每 1 分 = 成本 ×√2，每 2 分翻倍）"
+            "　·　下行是整次成本区间　·　最下行是约合时长"
+        )
     parts.append(
         f'<text x="{left}" y="{top + plot_h + 82}" fill="#33383d" '
-        f'font-size="12" font-weight="600">分数（每 1 分 = 成本 ×√2，每 2 分翻倍）'
-        f"　·　下行是整次成本区间　·　最下行是约合时长</text>"
+        f'font-size="12" font-weight="600">{axis_note}</text>'
     )
-    parts.append(f'<title>难度分布直方图</title>')
+    parts.append(
+        f"<title>{'代价分布直方图' if cost_axis else '难度分布直方图'}</title>"
+    )
     return (
         f'<svg viewBox="0 0 {width} {height}" width="100%" '
         f'preserveAspectRatio="xMidYMid meet" '
@@ -352,10 +514,11 @@ def _duration(tu: float) -> str:
     return f"{minutes / 60:.1f} 小时"
 
 
-def render_html(bins: list[Bin], marks: list[Mark], meta: Meta) -> str:
+def render_html(bins: list[Bin] | list[CostBin], marks: list[Mark], meta: Meta) -> str:
     """自包含 HTML（无外部资源），图标 + 图例 + 分维度统计。"""
     per_dim = totals(bins)
     scored = sum(per_dim.values())
+    title = "代价分布" if meta.axis == "cost" else "难度分布"
     legend = "".join(
         f'<span class="swatch" style="background:{DIM_COLOR[key]}"></span>'
         f'<span class="legend-label">{_esc(DIM_LABEL[key])}'
@@ -374,9 +537,31 @@ def render_html(bins: list[Bin], marks: list[Mark], meta: Meta) -> str:
         if lines
         else '<p class="muted">没有算出下界/末地的入口代价。</p>'
     )
+    gate_note = (
+        "虚线 = 进入该维度的<b>最低</b>成本；与柱子同箱时，柱子覆盖整个区间，"
+        "箱内物品可能分布在门槛两侧（精确值见下表）"
+        if meta.axis == "cost"
+        else "虚线 = 进入该维度的<b>最低</b>成本（档位是整档，会略微左溢）"
+    )
+    empty_note = (
+        '<span class="legend-label muted">空箱已略去（横轴写的是每箱的 TU 区间）</span>'
+        if meta.skip_empty
+        else ""
+    )
+    lowest_rows = "".join(
+        f"<tr><td>{_esc(label)}</td><td>{_esc(item)}</td><td>{cost:.2f} TU</td>"
+        f"<td>{_duration(cost)}</td></tr>"
+        for label, item, cost in meta.lowest
+    )
+    lowest_table = (
+        f"<table><thead><tr><th>维度</th><th>最便宜物品</th><th>整次成本</th>"
+        f"<th>约合时长</th></tr></thead><tbody>{lowest_rows}</tbody></table>"
+        if lowest_rows
+        else '<p class="muted">没有维度统计。</p>'
+    )
     return f"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
-<title>难度分布 · {_esc(meta.pack)}</title>
+<title>{title} · {_esc(meta.pack)}</title>
 <style>
 :root {{ color-scheme: light dark; }}
 body {{ margin: 0; padding: 28px 32px 48px; background: #fbfbfc; color: #22262a;
@@ -397,17 +582,18 @@ th {{ color: #8a9099; font-weight: 600; }}
 .muted {{ color: #8a9099; font-size: 13px; }}
 h2 {{ font-size: 14px; margin: 22px 0 8px; }}
 </style></head><body>
-<h1>难度分布 · {_esc(meta.pack)}</h1>
+<h1>{title} · {_esc(meta.pack)}</h1>
 <div class="sub">{meta.items} 件物品，其中 {scored} 件算了分数，
 {_esc(str(meta.unscored))} 件算不出可行路线（不进直方图）；每件按 {meta.demand:g} 个计。</div>
 <div class="card">
-  <div class="legend">{legend}
-    <span class="legend-label muted">虚线 = 进入该维度的<b>最低</b>成本
-      （档位是整档，会略微左溢）</span>
+  <div class="legend">{legend}{empty_note}
+    <span class="legend-label muted">{gate_note}</span>
   </div>
-  {render_svg(bins, marks)}
+  {render_svg(bins, marks, meta)}
 </div>
 <h2>门槛代价</h2>
 {gate_table}
+<h2>各维度最低</h2>
+{lowest_table}
 </body></html>
 """

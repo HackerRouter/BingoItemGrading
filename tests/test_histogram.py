@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import math
+import re
+
+import pytest
+
 from bingo_grading import histogram
 from bingo_grading.grade import DifficultyRow
 from bingo_grading.plan import Action, ActionSet, Requirement
 
 
-def _row(item: str, score: int | None, whole: float | None = None) -> DifficultyRow:
+def _row(
+    item: str,
+    score: int | None,
+    whole: float | None = None,
+    confidence: str = "high",
+) -> DifficultyRow:
     return DifficultyRow(
         item=item,
         score=score,
@@ -20,7 +30,7 @@ def _row(item: str, score: int | None, whole: float | None = None) -> Difficulty
         uncovered_total=0,
         uncovered_own=0,
         segments=1,
-        confidence="high",
+        confidence=confidence,
     )
 
 
@@ -124,6 +134,87 @@ def test_render_text_marks_the_gate_on_its_bin() -> None:
     marked = next(line for line in text.splitlines() if "下界入口" in line)
     assert marked.lstrip().startswith("2 "), f"挂错了档：{marked}"
     assert "下界入口 1.40 TU" in marked
+
+
+def test_cost_bins_are_log2_and_skip_empty() -> None:
+    """代价箱按 log2 切（每翻倍 per_octave 箱），默认略去空箱。"""
+    dims = {"a": histogram.EARTH, "b": histogram.NETHER}
+    rows = [
+        _row("a", 0, 0.75),
+        _row("b", 0, 3.0),
+    ]
+    bins = histogram.build_cost_bins(rows, dims, per_octave=2)
+    assert len(bins) == 2, "中间的空箱被略去"
+    assert bins[0].low == pytest.approx(2 ** -0.5)
+    assert bins[0].high == pytest.approx(1.0)
+    assert bins[1].low == pytest.approx(2 ** 1.5)
+    assert bins[1].high == pytest.approx(4.0)
+    assert bins[0].counts[histogram.EARTH] == 1
+    assert bins[1].counts[histogram.NETHER] == 1
+
+
+def test_cost_bins_drop_unscored_rows() -> None:
+    """没有整次成本的物品不进直方图，也不会凭空产生空箱。"""
+    bins = histogram.build_cost_bins(
+        [_row("a", None, None), _row("b", None, 0)], {"a": histogram.EARTH}, per_octave=2
+    )
+    assert bins == []
+
+
+def test_svg_stacks_dimensions_in_one_bar() -> None:
+    """三个维度叠在同一根柱子上：x 相同，高度相加。"""
+    dims = {
+        "a": histogram.EARTH,
+        "b": histogram.NETHER,
+        "c": histogram.END,
+    }
+    rows = [_row("a", 0, 1.5), _row("b", 0, 1.5), _row("c", 0, 1.5)]
+    bins = histogram.build_cost_bins(rows, dims, per_octave=2)
+    meta = histogram.Meta(pack="p", items=3, scored=3, axis="cost")
+    svg = histogram.render_svg(bins, [], meta)
+    assert svg.count("<rect") == 3, "三个维度各一段"
+    xs = re.findall(r'<rect x="([\d.]+)"', svg)
+    assert len(set(xs)) == 1, "同一根柱子"
+    for color in histogram.DIM_COLOR.values():
+        assert color in svg
+
+
+def test_gate_line_lands_inside_its_bin_when_empty_bins_are_skipped() -> None:
+    """空箱略去后，门槛线要按所属箱的箱内比例定位，不能按全局 log2 换算。"""
+    rows = [_row("a", 0, 1.5), _row("b", 0, 8.5)]
+    dims = {"a": histogram.EARTH, "b": histogram.EARTH}
+    bins = histogram.build_cost_bins(rows, dims, per_octave=1)
+    assert [round(item.low) for item in bins] == [1, 8], "中间空箱已被跳过"
+    meta = histogram.Meta(pack="p", items=2, scored=2, axis="cost", per_octave=1)
+    svg = histogram.render_svg(
+        bins,
+        [histogram.Mark(label="门槛", cost=8.5, color="#123456")],
+        meta,
+    )
+    match = re.search(r'x1="([\d.]+)" y1="50"', svg)
+    assert match is not None
+    # 两箱：step = (1180-78-30)/2 = 536；第二箱内 frac = 0.0875
+    want = 78 + (1 + 0.0875) * 536
+    assert float(match.group(1)) == pytest.approx(want, abs=2.0)
+
+
+def test_bars_and_gate_lines_share_the_same_x_axis() -> None:
+    """柱子与门槛线必须用同一套换算：成本落在箱内对数中点时，线穿过柱心。"""
+    bins = histogram.build_cost_bins(
+        [_row("a", 0, 1.5)], {"a": histogram.EARTH}, per_octave=1
+    )
+    assert len(bins) == 1 and bins[0].low == 1.0 and bins[0].high == 2.0
+    meta = histogram.Meta(pack="p", items=1, scored=1, axis="cost", per_octave=1)
+    svg = histogram.render_svg(
+        bins,
+        [histogram.Mark(label="门槛", cost=math.sqrt(2), color="#123456")],
+        meta,
+    )
+    rect = re.search(r'<rect x="([\d.]+)" y="[^"]+" width="([\d.]+)"', svg)
+    line = re.search(r'<line x1="([\d.]+)"[^>]*stroke="#123456"', svg)
+    assert rect is not None and line is not None
+    bar_center = float(rect.group(1)) + float(rect.group(2)) / 2
+    assert float(line.group(1)) == pytest.approx(bar_center, abs=0.2)
 
 
 def test_render_html_is_self_contained() -> None:

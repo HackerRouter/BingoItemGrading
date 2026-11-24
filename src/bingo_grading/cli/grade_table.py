@@ -361,11 +361,11 @@ def _grade_together(
 
 
 def _emit_histogram(rows, actionset, solved, args: argparse.Namespace) -> dict:
-    """难度直方图：终端文本 + 可选 HTML 文件。
+    """代价直方图：终端文本 + 可选 HTML 文件。
 
-    横轴是分数档（= log2 整次 TU），条形按「最早能在哪个维度拿到」堆叠。
-    下界/末地入口的代价用 `best_whole_cost` 算——和表里的「整次成本」同一口径，
-    否则线会落在错误的位置。
+    横轴是整次成本的对数箱（`--histogram-per-octave` 控制档位数量），每箱一根柱，
+    三个维度自下而上堆叠。下界/末地入口的代价用 `best_whole_cost` 算——
+    和表里的「整次成本」同一口径，否则线会落在错误的位置。
     """
     if not rows:
         return {"error": "没有可统计的物品"}
@@ -375,7 +375,8 @@ def _emit_histogram(rows, actionset, solved, args: argparse.Namespace) -> dict:
             actionset, rows[0].item, args.count, prune_dominated=False
         )
     dimensions = histogram_module.classify(actionset)
-    bins = histogram_module.build_bins(rows, dimensions)
+    per_octave = int(getattr(args, "histogram_per_octave", 4) or 4)
+    bins = histogram_module.build_cost_bins(rows, dimensions, per_octave=per_octave)
     by_id = {action.action_id: action for action in actionset.actions}
     marks = []
     for item, label, color in histogram_module.GATES:
@@ -385,11 +386,31 @@ def _emit_histogram(rows, actionset, solved, args: argparse.Namespace) -> dict:
         if whole is None or not math.isfinite(whole) or whole <= 0:
             continue
         marks.append(histogram_module.Mark(label=label, cost=float(whole), color=color))
+    lowest = []
+    for dim in (histogram_module.NETHER, histogram_module.END):
+        candidates = [
+            row
+            for row in rows
+            if dimensions.get(row.item) == dim and row.whole_cost_tu
+        ]
+        if candidates:
+            cheap = min(candidates, key=lambda row: row.whole_cost_tu)
+            lowest.append(
+                (
+                    histogram_module.DIM_LABEL[dim],
+                    cheap.item,
+                    float(cheap.whole_cost_tu),
+                )
+            )
     meta = histogram_module.Meta(
         pack=args.pack_version,
         items=len(rows),
         scored=sum(item.total for item in bins),
         demand=args.count,
+        axis="cost",
+        per_octave=per_octave,
+        skip_empty=True,
+        lowest=tuple(lowest),
     )
     if getattr(args, "histogram", False):
         _write_console(histogram_module.render_text(bins, marks, meta))
@@ -404,8 +425,15 @@ def _emit_histogram(rows, actionset, solved, args: argparse.Namespace) -> dict:
         )
         written.append(str(raw_path))
     return {
+        "axis": "cost",
+        "per_octave": per_octave,
         "bins": [
-            {"score": item.score, "total": item.total, **item.counts}
+            {
+                "low": round(item.low, 4),
+                "high": round(item.high, 4),
+                "total": item.total,
+                **item.counts,
+            }
             for item in bins
         ],
         "marks": [{"label": mark.label, "cost": round(mark.cost, 4)} for mark in marks],

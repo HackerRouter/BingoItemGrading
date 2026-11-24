@@ -70,6 +70,7 @@ flowchart TB
         E4["cli/grade_table<br/>难度表构建"]
         E1["grade.py<br/>逐件取价"]
         E2["histogram.py<br/>成本分布"]
+        E6["route_graph.py<br/>路线合成图"]
         E3["observe.py<br/>节点摊开"]
         C0["case/registry<br/>物品转动作集"]
     end
@@ -78,6 +79,7 @@ flowchart TB
     E4 -->|"成本分布"| E2
     E1 -->|"复用显示工具"| E3
     E5 -.->|"bg plan"| C0
+    E5 -.->|"bg plan --graph-out"| E6
 
     subgraph X["横切"]
         P["paths · config<br/>路径解析"]
@@ -127,6 +129,7 @@ flowchart TB
 | `build/<pack>/slots.jsonl` | `bg index slots` | 来源索引 + 配方 IR |
 | `build/<pack>/actions.jsonl` | `bg index actions` | 来源索引 + 统计 + 配方事实 |
 | 难度表与直方图 | `bg grade` | 落盘动作图 |
+| 路线合成图（DOT/SVG/HTML） | `bg plan --graph-out` | 现场拼图的动作集 |
 
 `data/upstream/`、`data/stats/` 与 `build/` 都不入库：前者由 `bg data sync` 重建，中者由 `bg data ingest` 与 `bg data loot` 重建，后者是运行产物。
 

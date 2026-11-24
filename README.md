@@ -13,7 +13,8 @@ Minecraft Bingo 地形包物品固有难度评分。给定一个地形包的可�
 - 战利品期望：自己解析战利品表（原版 + 地形包覆盖）算单箱期望，落成 `loot_expectation`。上游只管存在性，期望归本项目（ADR 0017）。
 - 上游接入：把可达性图产物导出来源路径索引，带硬前置、概率、来源类别与行动路线。
 - 槽位候选：来源索引 + 配方链展开，生成「物品 × 路线 × 获取方式」候选，并给出覆盖率报告。
-- 难度表与路线：任意物品从来源索引自动拼动作图，求解出主路线、备选段与整次成本，输出难度分与直方图。
+- 难度表与直方图：任意物品从来源索引自动拼动作图，求解出主路线、备选段与整次成本，输出难度分与直方图；直方图横轴是整次成本的对数箱，每箱一根柱、三个维度堆叠。
+- 路线合成图：`bg plan --graph-out` 把前几条路线画成 DOT/SVG/HTML，颜色按与最优路线的成本比浓淡。
 
 世界统计由两个平行项目产出：`RecipeAnalysis`（可达性图、配方 IR、原版静态数据）与 `WorldGenStatsCollector`（地形包与世界统计）。它们的**源码目录位置可配**（见下文「外部数据」），产物由 `bg data sync` 复制进 `data/`。`data/stats/<pack_version>/` 是采集侧一次运行的加工结果（含 `target.json`：种子、地形包哈希、jar 哈希），`26.3` 只是当前目录名。
 
@@ -134,6 +135,8 @@ bg observe --item capability:nether_access --table --pack-version 26.3
 bg plan --item minecraft:redstone --pack-version 26.3
 bg plan --item minecraft:redstone --expand --pack-version 26.3
 bg plan --item minecraft:oak_planks --paths --pack-version 26.3
+bg plan --item minecraft:diamond --graph-out build/graph-diamond --graph-paths 4 --graph-depth 3 --pack-version 26.3
+bg grade --all --histogram-out build/histogram.html --pack-version 26.3
 ```
 
 产物默认写到仓库根的 `build/`，可用 `--out` 覆盖。命令不依赖当前工作目录。

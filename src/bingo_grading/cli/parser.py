@@ -82,8 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--histogram",
         action="store_true",
         help=(
-            "在终端打印难度直方图：一行一个分数档，条形按主世界/下界/末地分色字符，"
-            "下界与末地的入口代价挂在对应档末尾。"
+            "在终端打印代价直方图：一行一个整次成本箱，每个维度一段字符，"
+            "下界与末地的入口代价挂在对应箱末尾。"
         ),
     )
     grade.add_argument(
@@ -91,8 +91,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="PATH",
         help=(
-            "把难度直方图写成自包含 HTML（内嵌 SVG，可悬停看每档明细），"
-            "下界/末地入口画成摩线。可重复，一次出多份。"
+            "把代价直方图写成自包含 HTML（内嵌 SVG，可悬停看每箱明细），"
+            "每箱一根柱、三个维度堆叠，下界/末地入口画成虚线。可重复，一次出多份。"
+        ),
+    )
+    grade.add_argument(
+        "--histogram-per-octave",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "直方图档位密度（默认 4，即每翻倍 4 箱）。"
+            "调大档位更多、柱子更细。"
         ),
     )
     grade.add_argument(
@@ -146,6 +156,28 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     plan.add_argument("--path-limit", type=int, default=3, help="列出前几条路线")
+    plan.add_argument(
+        "--graph-out",
+        metavar="PATH",
+        help=(
+            "把路线画成合成图：`PATH` 是基础名，写 `.dot`，"
+            "有 Graphviz 时再写 `.svg` 与 `.html`。颜色按与最优路线的成本比浓淡。"
+        ),
+    )
+    plan.add_argument(
+        "--graph-paths",
+        type=int,
+        default=3,
+        metavar="N",
+        help="合成图画前几条路线（默认 3）",
+    )
+    plan.add_argument(
+        "--graph-depth",
+        type=int,
+        default=4,
+        metavar="N",
+        help="合成图向下展开几层前置（默认 4；越大节点越多）",
+    )
     plan.set_defaults(handler=cmd_plan)
 
     observe_cmd = sub.add_parser(
