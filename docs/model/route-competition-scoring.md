@@ -6,6 +6,8 @@
 
 当前实现只有平均成本这一维。下面描述的尾部维度尚未落地：`loot/expect.py` 只传播一阶矩，`Segment` / `Curve` 也没有方差字段。
 
+**难度讨论用 TU**（`whole_cost_tu`）；下面这套分数换算只是同一数值的档位压缩，当前不作为可信输出，口径重定见 [`docs/planning/todo.md`](../planning/todo.md) 第〇节。
+
 ### 为什么方差不能乘进成本
 
 现在 `units.VARIANCE_PENALTY = {low:1.0, medium:1.2, high:1.5}` 是把风险折算成一个乘法系数。

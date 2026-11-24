@@ -43,14 +43,14 @@ def print_json(payload: dict) -> None:
 
 
 def _tier(cost: float) -> int:
-    from .units import tier_of
+    from ..units import tier_of
 
     return tier_of(cost)
 
 
 
 def _score(cost: float) -> int:
-    from .units import score_from_cost
+    from ..units import score_from_cost
 
     return score_from_cost(cost)
 

@@ -1,8 +1,12 @@
-"""路线合成图：把 `rank_paths` 的路线树画成 DOT / SVG / HTML。
+"""旧的路线合成图渲染器（单层节点）：保留在 `--graph-legacy` 下做对照。
 
-一条路线一棵树，**颜色浓度按「与最优路线的成本比」连续变化**：最优路线最深，
-越贵越浅（`cost_ratio` 1 → 深色，≥4 → 最浅）。同一件物品的多条候选并排画，
-一眼能看出哪条是主路、哪条只是备选。
+默认渲染已切到 `route_graph_ra`（RecipeAnalysis 的 item / rule 二分结构与
+`build_dot`）。除对照需要外不要在这里加功能，色值以 `route_graph_ra.colors`
+为准。
+
+颜色像脉络：**共享主干最深，分叉后按「与最优路线的成本比」逐渐变淡**。
+最淡色固定给**本图最差的那条分支**（色阶铺满，对比最明显）；最佳路线（1.00×）
+的边与节点边框额外标红，避免末端几条淡色分支难以分辨。
 
 Graphviz 是可选依赖：`dot` 不在 PATH 上时只写 `.dot`，由调用方决定是否报错。
 """
@@ -18,8 +22,11 @@ from .plan.explain import PathTree, Step
 
 # 成本比的着色端点。`CAP` 是「再贵也按最浅色画」的倍数。
 BEST_COLOR = "#1d4e73"
-WORST_COLOR = "#cbd8e3"
+# 色表编号 8（见 tools/show_color_scale.py）：足够浅，但仍能压在白色背景上。
+WORST_COLOR = "#cbe6f0"
 COST_RATIO_CAP = 4.0
+# 最佳路线单独标红：颜色深浅只表达「贵多少」，身份由红色锚点承担。
+HIGHLIGHT_COLOR = "#b91c1c"
 TARGET_FILL = "#fef3c7"
 TARGET_BORDER = "#b45309"
 NOTE_FILL = "#fff7ed"
@@ -44,12 +51,36 @@ def _mix(best: str, worst: str, t: float) -> str:
     return "#" + "".join(f"{value:02x}" for value in mixed)
 
 
-def route_color(ratio: float) -> str:
-    """成本比 → 颜色。1 倍（最优）最深，`COST_RATIO_CAP` 倍以上最浅。"""
-    if ratio <= 1.0 or not math.isfinite(ratio):
-        return BEST_COLOR
-    t = math.log(ratio) / math.log(COST_RATIO_CAP)
-    return _mix(BEST_COLOR, WORST_COLOR, t)
+def color_t(ratio: float, cap: float = COST_RATIO_CAP) -> float:
+    """成本比 → 插值位置：1 倍为 0（最浓），`cap` 倍及以上为 1（最浅）。
+
+    默认 `cap=COST_RATIO_CAP`；画图时传入**本图最差分支的成本比**，让最淡色
+    一定落到最差分支上，图内色阶铺满。保持对数比例：颜色差与真实成本差成正比，
+    1.00× 与 1.01× 看起来接近是正确表达；相近路线的身份由最佳路线的红色锚点承担。
+    """
+    if ratio <= 1.0 or not math.isfinite(ratio) or cap <= 1.0:
+        return 0.0
+    return min(1.0, math.log(ratio) / math.log(cap))
+
+
+def route_color(ratio: float, cap: float = COST_RATIO_CAP) -> str:
+    """成本比 → 颜色。1 倍（最优）最深，`cap` 倍以上最浅。"""
+    return _mix(BEST_COLOR, WORST_COLOR, color_t(ratio, cap))
+
+
+def route_ink(ratio: float, cap: float = COST_RATIO_CAP) -> str:
+    """图上的路线颜色：最优路线标红，其余按成本比浓淡。"""
+    if ratio <= 1.0 + 1e-9:
+        return HIGHLIGHT_COLOR
+    return route_color(ratio, cap)
+
+
+def _cost_cap(trees: list[PathTree], best: float) -> float:
+    """本图最差分支的成本比。所有路线同价时返回 1（没有可染淡的分支）。"""
+    if best <= 0:
+        return COST_RATIO_CAP
+    worst = max((tree.total_cost for tree in trees), default=best)
+    return worst / best if worst > best else 1.0
 
 
 def _attr(text: str) -> str:
@@ -72,8 +103,16 @@ def _short(text: str, limit: int = 42) -> str:
     return head
 
 
+def _html_text(text: str) -> str:
+    """HTML-like label 的文本转义（`&` `<` `>`）；引号在 HTML 文本里合法。"""
+    return html.escape(str(text), quote=False)
+
+
 def _node_label(step: Step) -> str:
-    """节点标签：动作名 / 物品名 + 单价与需求量。"""
+    """节点标签：HTML 表格，`CELLPADDING` 把行距放宽。
+
+    成本写成 `30.63 TU × 1`，不再用「单价: xxx TU/个」占一行。
+    """
     if step.action_id:
         title = step.action_id.replace("minecraft:", "")
     else:
@@ -82,16 +121,21 @@ def _node_label(step: Step) -> str:
     if step.label:
         lines.append(_short(step.label))
     if step.unit_cost and math.isfinite(step.unit_cost):
-        lines.append(f"{step.unit_cost:.3f} TU/个 × {step.need:.3g}")
+        lines.append(f"{step.unit_cost:.2f} TU × {step.need:.3g}")
     if step.note:
         lines.append(step.note)
-    return "\n".join(lines)
+    rows = "".join(f"<TR><TD>{_html_text(line)}</TD></TR>" for line in lines)
+    return (
+        '<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="3">'
+        + rows
+        + "</TABLE>"
+    )
 
 
 def _node_attrs(step: Step, color: str) -> str:
     """一个 `Step` 的 DOT 属性。"""
     attrs = {
-        "label": f'"{_attr(_node_label(step))}"',
+        "label": f"<{_node_label(step)}>",
         "shape": "box",
         "style": '"filled,rounded"',
         "fillcolor": '"#f8fafc"',
@@ -126,12 +170,14 @@ def _step_key(step: Step) -> str:
 def build_dot(trees: list[PathTree], target: str, *, rankdir: str = "BT") -> str:
     """路线树 → DOT 文本。箭头指「前置 → 动作」，从下往上读是一条获取路径。
 
-    节点跨路线共享：同一动作只画一次，颜色取它出现过的**最优先**路线；
-    边也按 (前置, 动作) 去重，颜色取最优先的那条。
+    节点跨路线共享：同一动作只画一次。**红色只标 target 的候选来源里成本最低的
+    那条**。动作节点的多条入边是它的前置（AND），不是候选（OR）——把 AND 也标红
+    会让红色沿整条依赖链传下去，正是要避免的。
     """
     if not trees:
         return "digraph routes {\n}\n"
     best = min((tree.total_cost for tree in trees if tree.total_cost > 0), default=0.0)
+    cap = _cost_cap(trees, best)
     nodes: dict[str, tuple[Step, float]] = {}
     edges: list[tuple[str, str, float, str]] = []
 
@@ -165,19 +211,33 @@ def build_dot(trees: list[PathTree], target: str, *, rankdir: str = "BT") -> str
         ' penwidth=2.4, peripheries=2, fontsize=12, fontcolor="#78350f"];',
     ]
     for key, (step, ratio) in nodes.items():
-        color = route_color(ratio)
-        lines.append(f'  "{key}" [{_node_attrs(step, color)}];')
+        color = route_color(ratio, cap)
+        lines.append(f'  "{_attr(key)}" [{_node_attrs(step, color)}];')
 
     unique: dict[tuple[str, str], tuple[float, str]] = {}
     for source, destination, ratio, label in edges:
         pair = (source, destination)
         if pair not in unique or ratio < unique[pair][0]:
             unique[pair] = (ratio, label)
+
+    incoming: dict[str, list[float]] = {}
+    for (_source, destination), (ratio, _label) in unique.items():
+        incoming.setdefault(destination, []).append(ratio)
+    # 只有**物品节点**（target）的多条入边才是候选来源（OR）；
+    # 动作节点的多条入边是它的前置（AND），不能「选最佳」，也就都不标红。
+    target_branched = len(incoming.get("target", [])) > 1
+    target_best = min(incoming.get("target", [1.0]))
+
     for (source, destination), (ratio, label) in unique.items():
-        color = route_color(ratio)
-        penwidth = "2.0" if destination == "target" else "1.4"
+        is_winner = (
+            destination == "target"
+            and target_branched
+            and abs(ratio - target_best) <= 1e-9
+        )
+        color = HIGHLIGHT_COLOR if is_winner else route_color(ratio, cap)
+        penwidth = "2.0" if is_winner else "1.4"
         lines.append(
-            f'  "{source}" -> "{destination}" [color="{color}",'
+            f'  "{_attr(source)}" -> "{_attr(destination)}" [color="{color}",'
             f' penwidth="{penwidth}"{label}];'
         )
     lines.append("}")
@@ -200,17 +260,25 @@ def render_html(dot_text: str, trees: list[PathTree], target: str) -> str:
             "DOT 文件已写出，装好 Graphviz 后重新生成即可。</p>"
         )
     best = min((tree.total_cost for tree in trees if tree.total_cost > 0), default=0.0)
+    cap = _cost_cap(trees, best)
     rows = "".join(
         f'<tr><td>#{tree.rank}</td>'
         f'<td><span class="chip" style="background:'
-        f'{route_color(tree.total_cost / best if best > 0 else 1.0)}"></span>'
+        f'{route_ink(tree.total_cost / best if best > 0 else 1.0, cap)}"></span>'
         f'{(tree.total_cost / best if best > 0 else 1.0):.2f}×</td>'
-        f"<td>{tree.unit_cost:.3f} TU/个</td>"
+        f"<td>{tree.unit_cost:.2f} TU</td>"
         f"<td>{tree.total_cost:.2f} TU</td>"
         f"<td>{tree.rank_gap:+.2f}</td>"
         f"<td>{'(最优)' if tree.rank == 1 else ''}</td></tr>"
         for tree in sorted(trees, key=lambda item: item.rank)
     )
+    if cap > 1.0:
+        ramp_note = (
+            f"其余按与最优的成本比由浓到浅："
+            f"本图最差分支（{cap:.2f}×）用最浅色 <code>{WORST_COLOR}</code>。"
+        )
+    else:
+        ramp_note = "所有路线同价，分叉处均按同色处理。"
     name = target.split(":", 1)[-1]
     safe_name = html.escape(name)
     return f"""<!DOCTYPE html>
@@ -236,7 +304,8 @@ h2 {{ font-size: 14px; margin: 22px 0 8px; }}
 <h1>合成图 · {safe_name}</h1>
 <div class="sub">
   箭头指「前置 → 动作」，从下往上读是一条获取路径。
-  <b>颜色浓度 = 与最优路线的成本比</b>：最深是最优，越浅越贵（≥{COST_RATIO_CAP:g} 倍后到最浅）。
+  <b>红色 = target 的候选来源里成本最低的那条</b>；动作节点下方的多条箭头是它的
+  前置（AND），不是候选，不标红。{ramp_note}
   虚线橙框 = 环或深度截断，不是正常来源。
 </div>
 <div class="card">{svg}</div>

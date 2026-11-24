@@ -349,3 +349,11 @@ def test_all_block_types_have_positive_seconds() -> None:
         assert seconds > 0, name
         checked += 1
     assert checked > 100, f"只检查了 {checked} 个方块，挖掘事实似乎没读到"
+
+
+def test_cli_scoring_helpers_resolve_units() -> None:
+    """`bg mining` 经 `cli.common._tier` / `_score` 取档位与分数，导入路径写错会直接 ImportError。"""
+    from bingo_grading.cli import common
+
+    assert isinstance(common._tier(122.884), int)
+    assert isinstance(common._score(122.884), int)

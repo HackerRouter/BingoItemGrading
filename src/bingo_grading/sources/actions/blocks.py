@@ -154,6 +154,7 @@ def _block(
         batch=1.0,
         action_id=f"mine:surface:{_short(block)}",
         requires=tool_requires,
+        entries_per_block=entries,
     )
     if surface is not None:
         result.emit(surface)
@@ -166,6 +167,7 @@ def _block(
         batch=1.0,
         action_id=f"mine:cave:{_short(block)}",
         requires=tool_requires,
+        entries_per_block=entries,
     )
     if cave is not None:
         result.emit(cave)

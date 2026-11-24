@@ -12,7 +12,8 @@ from ...case.registry import builder_for
 from ...plan import PlanError, SolveError, SupplyError, TierError
 from ...plan import solve as solve_plan
 from ...plan.explain import rank_paths, render as render_paths
-from ...route_graph import write_outputs as write_route_graph
+from ...route_graph import write_outputs as write_route_graph_legacy
+from ...route_graph_ra import write_outputs as write_route_graph
 from ...mining import MiningError, estimate_from_row
 from ... import grade as grade_module
 from ... import observe as observe_module
@@ -163,7 +164,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
             depth=max(1, int(getattr(args, "graph_depth", 4))),
         )
         if trees:
-            written = write_route_graph(Path(args.graph_out), trees, args.item)
+            writer = write_route_graph_legacy if args.graph_legacy else write_route_graph
+            written = writer(Path(args.graph_out), trees, args.item)
             payload["graph"] = {"out": written, "paths": len(trees)}
         else:
             payload["graph"] = {"out": [], "error": "没有可画的路线"}

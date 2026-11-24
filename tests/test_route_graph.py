@@ -63,34 +63,86 @@ def test_nodes_are_shared_across_routes() -> None:
     assert dot.count('"craft:pickaxe#0" ->') == 2
 
 
-def test_edges_take_the_most_prioritized_color() -> None:
-    """共享边按最优先的那条路线着色，不会被后面的浅色覆盖。"""
+def test_single_candidate_edges_use_the_cost_ramp() -> None:
+    """单候选分叉不标红：只有多来源比较时红色才有意义。"""
     shared = _step("minecraft:pickaxe", "craft:pickaxe#0")
     trees = [
         _tree(1, 10.0, _step("minecraft:x", "mine:ore", children=(shared,))),
         _tree(2, 40.0, _step("minecraft:x", "loot:chest", children=(shared,))),
     ]
     dot = route_graph.build_dot(trees, "minecraft:x")
-    best = route_graph.BEST_COLOR
-    worst = route_graph.WORST_COLOR
     assert (
         f'"craft:pickaxe#0" -> "mine:ore"'
-        f' [color="{best}"' in dot
+        f' [color="{route_graph.BEST_COLOR}"' in dot
     )
     assert (
         f'"craft:pickaxe#0" -> "loot:chest"'
-        f' [color="{worst}"' in dot
+        f' [color="{route_graph.WORST_COLOR}"' in dot
     )
-    assert worst in dot, "第二条路线的边仍是浅色"
+
+
+def test_only_branched_decisions_highlight_the_best() -> None:
+    """target 有两条候选来源时，只有成本最低的那条标红。"""
+    trees = [
+        _tree(1, 10.0, _step("minecraft:x", "mine:ore")),
+        _tree(2, 20.0, _step("minecraft:x", "loot:chest")),
+    ]
+    dot = route_graph.build_dot(trees, "minecraft:x")
+    assert (
+        f'"mine:ore" -> "target" [color="{route_graph.HIGHLIGHT_COLOR}"' in dot
+    )
+    assert (
+        f'"loot:chest" -> "target" [color="{route_graph.WORST_COLOR}"' in dot
+    )
+    assert f'"loot:chest" -> "target" [color="{route_graph.HIGHLIGHT_COLOR}"' not in dot
+
+
+def test_action_preconditions_are_not_highlighted() -> None:
+    """一个动作有多个前置（AND）时，不能把其中一条当「最佳候选」标红。"""
+    root = _step(
+        "minecraft:x",
+        "loot:end_cities",
+        children=(
+            _step("minecraft:a", "travel:a"),
+            _step("minecraft:b", "travel:b"),
+        ),
+    )
+    dot = route_graph.build_dot([_tree(1, 10.0, root)], "minecraft:x")
+    assert route_graph.HIGHLIGHT_COLOR not in dot
+    assert (
+        dot.count(f'-> "loot:end_cities" [color="{route_graph.BEST_COLOR}"') == 2
+    )
+
+
+def test_best_route_gets_a_red_highlight() -> None:
+    """路线对照表里的最佳行仍用红色色块。"""
+    assert route_graph.route_ink(1.0) == route_graph.HIGHLIGHT_COLOR
+    assert route_graph.route_ink(1.01) != route_graph.HIGHLIGHT_COLOR
+    assert route_graph.route_ink(route_graph.COST_RATIO_CAP) == route_graph.WORST_COLOR
+
+
+def test_worst_branch_gets_the_lightest_color() -> None:
+    """最浅色固定给本图最差分支，而不是固定的 4 倍端点。"""
+    shared = _step("minecraft:pickaxe", "craft:pickaxe#0")
+    trees = [
+        _tree(1, 10.0, _step("minecraft:x", "mine:ore", children=(shared,))),
+        _tree(2, 13.0, _step("minecraft:x", "loot:chest", children=(shared,))),
+    ]
+    dot = route_graph.build_dot(trees, "minecraft:x")
+    assert (
+        f'"craft:pickaxe#0" -> "loot:chest"'
+        f' [color="{route_graph.WORST_COLOR}"' in dot
+    )
 
 
 def test_notes_and_quotes_are_escaped() -> None:
-    """截断/环节点用虚线，标签里的引号不会破坏 DOT 语法。"""
+    """截断/环节点用虚线；HTML label 里的引号不会破坏 DOT 语法。"""
     step = _step("minecraft:x", 'weird:"name"', note="递归深度用尽")
     dot = route_graph.build_dot([_tree(1, 1.0, step)], "minecraft:x")
     assert 'style="dashed,filled"' in dot
-    assert '\\"' in dot
-
+    assert "label=<<TABLE" in dot
+    assert "递归深度用尽" in dot
+    assert "weird:" in dot
 
 def test_write_outputs_always_writes_dot_and_html(tmp_path) -> None:
     trees = [_tree(1, 1.0, _step("minecraft:x", "mine:ore"))]

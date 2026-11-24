@@ -13,8 +13,8 @@ Minecraft Bingo 地形包物品固有难度评分。给定一个地形包的可�
 - 战利品期望：自己解析战利品表（原版 + 地形包覆盖）算单箱期望，落成 `loot_expectation`。上游只管存在性，期望归本项目（ADR 0017）。
 - 上游接入：把可达性图产物导出来源路径索引，带硬前置、概率、来源类别与行动路线。
 - 槽位候选：来源索引 + 配方链展开，生成「物品 × 路线 × 获取方式」候选，并给出覆盖率报告。
-- 难度表与直方图：任意物品从来源索引自动拼动作图，求解出主路线、备选段与整次成本，输出难度分与直方图；直方图横轴是整次成本的对数箱，每箱一根柱、三个维度堆叠。
-- 路线合成图：`bg plan --graph-out` 把前几条路线画成 DOT/SVG/HTML，颜色按与最优路线的成本比浓淡。
+- 难度表与直方图：任意物品从来源索引自动拼动作图，求解出主路线、备选段与整次成本，输出整次成本（TU）与直方图；直方图横轴是整次成本的对数箱，每箱一根柱、三个维度堆叠。
+- 路线合成图：`bg plan --graph-out` 把前几条路线画成 DOT/SVG/HTML；图是 RecipeAnalysis 那套 item / rule 二分结构（矩形=物品、菱形=动作），渲染层直接复用它的 `PathGraph` + `build_dot`。target 的候选来源里成本最低的那条标红，其余按与最优路线的成本比由浓到浅。
 
 世界统计由两个平行项目产出：`RecipeAnalysis`（可达性图、配方 IR、原版静态数据）与 `WorldGenStatsCollector`（地形包与世界统计）。它们的**源码目录位置可配**（见下文「外部数据」），产物由 `bg data sync` 复制进 `data/`。`data/stats/<pack_version>/` 是采集侧一次运行的加工结果（含 `target.json`：种子、地形包哈希、jar 哈希），`26.3` 只是当前目录名。
 
@@ -112,31 +112,15 @@ bg data loot --pack-version 26.3       # 战利品期望 → loot_expectation，
 
 ## 命令
 
-所有命令都要显式给地形包版本（`--pack-version` / `--pack` / `--label`）；下面的 `26.3` 只是示例，换成你的包版本。
+所有命令都要显式给地形包版本（`--pack-version` / `--pack` / `--label`）；下面的 `26.3` 只是示例，换成你的包版本。逐命令参数、常见任务对照与产物位置见 [docs/command-cheatsheet.md](docs/command-cheatsheet.md)。
 
 ```bash
 bg doctor --pack 26.3                      # 检查上游产物、统计快照与知识表
-bg data sync --pack 26.3                   # 上游产物 → data/（约 21 MB）
-bg data verify --pack 26.3                 # 按 manifest 校验 data/ 副本
-bg data ingest --pack 26.3                 # 采集侧运行目录 → data/stats/<pack>/（meta + spatial + facts）
-bg data ingest --pack 26.3 --index build/26.3/source_index.jsonl --report build/stats-gap-report.json
-bg data loot --pack-version 26.3           # 战利品期望 → loot_expectation，并入 facts.jsonl
-bg index sources --label 26.3              # 写 build/<label>/source_index.jsonl
-bg index slots --label 26.3                # 写 build/<label>/slots.jsonl
-bg index slots --report --label 26.3 [--item <物品>] [--out <报告路径>]
 bg index actions --pack-version 26.3       # 全库动作图 → build/<pack>/actions.jsonl
-bg stat --pack 26.3 --stat ore_exposure --dimension minecraft:overworld \
-    --biome minecraft:badlands --subject minecraft:gold_ore
-bg grade --all --pack-version 26.3         # 全库难度表（复用落盘图；没有则先建）
-bg grade --item diamond,redstone --table --pack-version 26.3   # 单件难度（读落盘图，--rebuild 强制重建）
-bg observe --item iron_pickaxe,blaze_rod --table --pack-version 26.3
-bg observe --item portal:full_frame,end:portal --table --pack-version 26.3
-bg observe --item capability:nether_access --table --pack-version 26.3
-bg plan --item minecraft:redstone --pack-version 26.3
-bg plan --item minecraft:redstone --expand --pack-version 26.3
-bg plan --item minecraft:oak_planks --paths --pack-version 26.3
-bg plan --item minecraft:diamond --graph-out build/graph-diamond --graph-paths 4 --graph-depth 3 --pack-version 26.3
+bg grade --all --table-out build/all.md --pack-version 26.3
 bg grade --all --histogram-out build/histogram.html --pack-version 26.3
+bg plan --item minecraft:diamond --graph-out build/graph-diamond --graph-paths 4 --graph-depth 3 --pack-version 26.3
+bg observe --item minecraft:iron_pickaxe --table --pack-version 26.3
 ```
 
 产物默认写到仓库根的 `build/`，可用 `--out` 覆盖。命令不依赖当前工作目录。

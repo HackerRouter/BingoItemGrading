@@ -16,6 +16,7 @@ import pytest
 from bingo_grading import gamedata, mining_facts, units
 from bingo_grading.case.context import CaseContext
 from bingo_grading.case.sources import ActionBundle, structure_block
+from bingo_grading.case.sources.exposure import mine_surface
 from bingo_grading.sources import actions
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -172,4 +173,35 @@ def test_concrete_solidifies_from_powder(ctx: CaseContext) -> None:
     assert any(
         a.item == actions.WATER_SOURCE for a in built.actionset().actions
     ), "水源能力没有来源动作"
+
+
+def test_surface_cost_scales_with_blocks_per_item(ctx: CaseContext) -> None:
+    """`entries_per_block` 是「一块方块掉几个」：掉落期望减半，凑 1 件要挖两倍块数。
+
+    树叶掉木棍只有 3%（`yield_per_trigger`），漏掉这层折算会把代价压到实际的
+    三十三分之一，于是「打树叶」比「原木 → 木板 → 木棍」还便宜。
+    """
+    full = mine_surface(
+        ActionBundle(label="test"),
+        ctx,
+        block="minecraft:oak_leaves",
+        item="minecraft:stick",
+        batch=1.0,
+        action_id="mine:surface:full",
+        entries_per_block=1.0,
+    )
+    third = mine_surface(
+        ActionBundle(label="test"),
+        ctx,
+        block="minecraft:oak_leaves",
+        item="minecraft:stick",
+        batch=1.0,
+        action_id="mine:surface:third",
+        entries_per_block=1 / 3,
+    )
+    assert full is not None and third is not None
+    assert third.cost == pytest.approx(full.cost * 3)
+    # 产量与一次性成本不随掉落率变：凑 1 件仍是 1 件，找首片只付一次。
+    assert third.yields["minecraft:stick"] == 1.0
+    assert third.overhead == full.overhead
 

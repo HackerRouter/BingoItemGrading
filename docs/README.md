@@ -2,6 +2,10 @@
 
 按职责分三类：契约写「上游要交付什么」，数据写「一行记录长什么样」，模型写「这份数怎么算」。另有架构总览与决策记录。
 
+## 命令
+
+- [`command-cheatsheet.md`](command-cheatsheet.md)：逐命令参数、常见任务对照、产物位置。
+
 ## 架构
 
 - [`architecture.md`](architecture.md)：五个阶段的数据流图、产物与命令、分层边界。

@@ -176,7 +176,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4,
         metavar="N",
-        help="合成图向下展开几层前置（默认 4；越大节点越多）",
+        help=(
+            "合成图向下展开几层前置（默认 4）。超出这一层的节点画成虚线框："
+            "它自己的成本已经计入，只是不再展开更下游的明细"
+        ),
+    )
+    plan.add_argument(
+        "--graph-legacy",
+        action="store_true",
+        help="用旧的单层节点渲染器画合成图（保留对照用）",
     )
     plan.set_defaults(handler=cmd_plan)
 
