@@ -95,19 +95,21 @@ h2 {{ font-size: 14px; margin: 22px 0 8px; }}
 <h1>合成图 · {name}</h1>
 <div class="sub">
   箭头指「来源 → 产物」，从上往下读是一条获取路径，产物沉在整张图最下面。
-  <b>椭圆 = 物品</b>：多条入边就是同一物品的多个候选来源（OR）；
+  <b>椭圆 = 物品</b>：多条入边就是同一物品的多个候选来源（OR），最优那条在红色路线上；
   <b>圆角矩形 = 一条动作</b>：多条入边是它的并列前置（AND），缺一不可。
-  <b>红色 = 最优的那条路线</b>（从原料一路走到 target；并列最优只在图上标红第一条，
-  其余同价路线见下方对照表，名次会并列）；
+  <b>红色 = 最优的那条路线</b>（从原料一路走到 target）。只有一个候选来源时它同样标红
+  —— 那就是唯一的路；并列最优只在图上标红第一条，其余同价路线见下方对照表，名次会并列。
   每个动作节点的数字写成一条等式：<b>`单价 × 需要量 + 固定 = 整次`</b>。
   `单价` 已含直接前置的边际（`×1/9` 表示一次动作产出 9 件、这里只分摊九分之一），
   `固定` 是这一段的固定成本（去村庄、进下界、打一场龙这类只付一次的开销），`整次` 就是凑够这件东西的
   总价 —— 根节点那个数等于 target 边上标的数字。
   固定成本按名字去重，同一条路线里只算一次，所以<b>子节点各自相加可能大于父节点</b>：
   共享的那笔在两处都会展示，但只收一次。
-  <b>把鼠标放到节点上</b>可以看到单价由哪几项折进来、以及哪些固定成本被合并掉了。{ramp_note}
-  虚线框是展到深度上限的节点——它的成本已经算进去了，省掉的只是更下游的明细；
-  路径上已经出现过的前置（环）直接不画。
+  <b>把鼠标放到节点上</b>可以看到单价由哪几项折进来、以及哪些固定成本被合并掉了。
+  橙框虚线节点 = 还有若干条候选没画（贵过阈值或超出节点上限，tooltip 里写原因）。{ramp_note}
+  虚线框是展到深度上限的节点——它的成本已经算进去了，省掉的只是更下游的明细。
+  虚线<b>回边</b>是「这一步要用的东西本页已经在造了」：例如用钻石块分解出钻石，而钻石块
+  又要钻石合成，箭头会绕回上面的物品节点，那一份按该物品的最优价计。
 </div>
 <div class="card">{svg_text}</div>
 <h2>路线对照</h2>
@@ -125,6 +127,11 @@ def write_outputs(
     *,
     rankdir: str = "TB",
     frontiers: list[dict] | None = None,
+    solved=None,
+    actionset=None,
+    branches: int = 0,
+    max_nodes: int = 0,
+    ratio_limit: float = 0.0,
 ) -> list[str]:
     """写 `<base>.dot`，能画 SVG 时再写 `<base>.svg` 与 `<base>.html`。
 
@@ -135,7 +142,16 @@ def write_outputs(
     stem = base.with_suffix("") if base.suffix else base
     if stem.parent and not stem.parent.exists():
         stem.parent.mkdir(parents=True, exist_ok=True)
-    graph = to_path_graph(trees, target, rankdir=rankdir)
+    graph = to_path_graph(
+        trees,
+        target,
+        rankdir=rankdir,
+        solved=solved,
+        actionset=actionset,
+        branches=branches,
+        max_nodes=max_nodes,
+        ratio_limit=ratio_limit,
+    )
     dot_text = build_dot(graph, PathOptions(rankdir=rankdir))
     dot_path = stem.with_suffix(".dot")
     dot_path.write_text(dot_text, encoding="utf-8", newline="\n")

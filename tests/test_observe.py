@@ -69,6 +69,39 @@ class _FakeSolved:
         self.curves = {}
 
 
+def test_report_node_flags_self_serving_sources() -> None:
+    """「要先用它自己」的来源单独列出，不混在候选里当作可选项。"""
+    from bingo_grading.plan import Action, ActionSet, Requirement, solve
+
+    actionset = ActionSet(
+        label="cycle",
+        actions=(
+            Action(action_id="p1", item="minecraft:p", cost=1.0, yields={"minecraft:p": 1.0}),
+            Action(
+                action_id="p2",
+                item="minecraft:p",
+                cost=1.2,
+                yields={"minecraft:p": 1.0},
+                requires=(Requirement("minecraft:q", 1.0),),
+            ),
+            Action(
+                action_id="q1",
+                item="minecraft:q",
+                cost=1.0,
+                yields={"minecraft:q": 1.0},
+                requires=(Requirement("minecraft:p", 1.0),),
+            ),
+        ),
+    )
+    solved = solve(actionset, "minecraft:p", 1.0, prune_dominated=False)
+    report = observe.report_node(actionset, solved, "minecraft:p")
+    # 最便宜那条（p1）不绕圈，不该被列进来。
+    assert [entry["action_id"] for entry in report["self_serving"]] == ["p2"]
+    text = observe.render([report])
+    assert "绕回自身的来源" in text
+    assert "p2" in text
+
+
 def test_report_action_reads_action_fields() -> None:
     """清单里给动作 id 时，报的是动作本身而不是「某物品的价」。"""
     from bingo_grading.plan import Action, ActionSet, Requirement

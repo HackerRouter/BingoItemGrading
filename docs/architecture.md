@@ -131,7 +131,7 @@ flowchart TB
 | 难度表与直方图 | `bg grade` | 落盘动作图 |
 | 路线合成图（DOT/SVG/HTML） | `bg plan --graph-out` | 现场拼图的动作集 |
 
-合成图默认走 `route_graph_ra`：图结构与渲染层照搬 RecipeAnalysis 的 `PathGraph` / `build_dot`（item 矩形、rule 菱形），本仓库只提供 `PathTree → PathGraph` 的 adapter 与 HTML 外壳（路线对照表）。旧的单层节点渲染器 `route_graph.py` 与 `--graph-legacy` 已于 2026-11-25 删除。HTML 另附「前置替换成本」表（`--graph-frontiers`）：禁用某前置当前的来源后**重新求解整条路线**，差额含固定成本去重与多级依赖的真实变化。
+合成图默认走 `route_graph_ra`：图结构与渲染层照搬 RecipeAnalysis 的 `PathGraph` / `build_dot`（item 矩形、rule 菱形），本仓库只提供 `PathTree → PathGraph` 的 adapter 与 HTML 外壳（路线对照表）。旧的单层节点渲染器 `route_graph.py` 与 `--graph-legacy` 已于 2026-11-25 删除。HTML 另附「前置替换成本」表（`--graph-frontiers`）：禁用某前置当前的来源后**重新求解整条路线**，差额含固定成本去重与多级依赖的真实变化。图里也可以直接画上游候选（`--graph-branches` / `--graph-branch-ratio` / `--graph-max-nodes`）：默认每个物品画最优 + 2 个备选、只画贵不到 1.5 倍的，超出上限的数量画成橙框虚线节点。依赖回到自己的上游候选不画（`diamond` 的「钻石块分解」要经过 `diamond_block`，而钻石块又要钻石合成，画出来只剩一个没有入边的合成节点），只在虚线节点的 tooltip 里注明「依赖自己」。已经画出来的路线里遇到回边时，画成不参与层级计算的虚线，表示这一步要用的东西本页正在造，那一份按该物品的最优价计。
 
 `data/upstream/`、`data/stats/` 与 `build/` 都不入库：前者由 `bg data sync` 重建，中者由 `bg data ingest` 与 `bg data loot` 重建，后者是运行产物。
 

@@ -6,16 +6,20 @@
 - **rule 节点**（菱形）：一条动作。多条入边 = 该动作的并列前置（AND）；
 - 边一律「来源 → 产物」：`item(前置) -> rule -> item(产物)`。
 
-B1a 只展开 `rank_paths` 已经给出的树：根级有 N 条候选，每个前置取它自己的
-最优来源。前置级的候选展开留给 B1b。
+`rank_paths` 给出的树只展开**根级**候选（每个前置取自己的最优来源）。要看上游的
+候选，传 `solved` + `actionset` + `branches`：`to_path_graph` 会按广度遍历整张图，
+给每个「有多个来源」的物品补上候选规则节点。候选数受 `branches` 限制（0 = 全部），
+节点总数受 `max_nodes` 兜底，被截掉的数量记进 `graph.omitted` 并画成显式节点。
 """
 
 from __future__ import annotations
 
 import html
 import math
+import re
+from collections import deque
 
-from ..plan.explain import PathTree, Step
+from ..plan.explain import MAX_DEPTH, PathTree, Step, _step as build_step, has_cycle
 from .colors import HIGHLIGHT_COLOR, cost_cap, route_color, route_ink
 from .path_graph import PathGraph
 from .style import short
@@ -126,6 +130,29 @@ def _per_unit(need: float, parent_need: float) -> float:
     return need / parent_need
 
 
+_RECIPE_TAIL = re.compile(r"（[^（）]*json[^（）]*）")
+
+# 候选没画出来的两种原因：依赖回到自己、代价太高。
+SKIP_CYCLIC = "依赖自己"
+SKIP_COSTLY = "贵过阈值或超出上限"
+
+
+def _clean_label(text: str) -> str:
+    """去掉 label 里对读路线没用的部分：`（crafting_shapeless；data/…json）` 与命名空间前缀。"""
+    text = _RECIPE_TAIL.sub("", text).replace("minecraft:", "")
+    return text.strip()
+
+
+def _trim(text: str, limit: int) -> str:
+    """超长文本截断并交代原长，避免 tooltip 被一条长描述占满。"""
+    return text if len(text) <= limit else f"{text[:limit]}…（共 {len(text)} 字）"
+
+
+def _bare(name: str) -> str:
+    """`capability:nether_access` / `minecraft:coal` → 最后一段，用于跨形式判重。"""
+    return name.rsplit(":", 1)[-1]
+
+
 def _tooltip(
     step: Step, cache: dict[int, tuple[float, dict[str, float], float]]
 ) -> str:
@@ -146,8 +173,7 @@ def _tooltip(
         pieces.append("单价 = " + " + ".join(parts))
     if names:
         detail = " + ".join(
-            f"{name.rsplit(':', 1)[-1]} {amount:.2f}"
-            for name, amount in sorted(names.items())
+            f"{_bare(name)} {amount:.2f}" for name, amount in sorted(names.items())
         )
         line = f"固定 = {detail}"
         children_fixed = sum(_cost_tree(child, cache)[2] for child in step.children)
@@ -155,21 +181,44 @@ def _tooltip(
             line += f"（前置合计 {children_fixed:.2f}，同名只算一次）"
         pieces.append(line)
     if once:
-        pieces.append("一次性前置：" + "、".join(short(child.item) for child in once))
+        # 固定行已经逐笔列出金额的前置不再重复，这行只补「金额为 0」的共享前置。
+        paid = {_bare(name) for name in names}
+        extra = [short(child.item) for child in once if _bare(child.item) not in paid]
+        if extra:
+            pieces.append("一次性前置：" + "、".join(extra))
     if abs(step.calls - step.need) > 1e-9:
         pieces.append(f"调用 {step.calls:g} 次")
+    # 来源与完整描述合并成一行：两者都是「这条动作出自哪里」。
+    tail: list[str] = []
     if step.source:
-        pieces.append(step.source)
+        tail.append(step.source.replace("minecraft:", ""))
     if step.label and len(step.label) > 48:
-        # 图上把 label 截到 48 字，全文只有这里能看到。
-        pieces.append(step.label)
+        # 图上把 label 截到 48 字；这里给全文（去掉配方文件路径与命名空间）。
+        tail.append(_trim(_clean_label(step.label), 100))
+
+    if tail:
+        pieces.append(" ｜ ".join(tail))
     return "\n".join(pieces)
 
 
 def to_path_graph(
-    trees: list[PathTree], target: str, *, rankdir: str = "TB"
+    trees: list[PathTree],
+    target: str,
+    *,
+    rankdir: str = "TB",
+    solved=None,
+    actionset=None,
+    branches: int = 0,
+    max_nodes: int = 0,
+    depth: int = MAX_DEPTH,
+    ratio_limit: float = 0.0,
 ) -> PathGraph:
-    """把前 N 条路线转成一张 item / rule 图。"""
+    """把前 N 条路线转成一张 item / rule 图。
+
+    `solved` / `actionset` 给出来时，额外展开上游候选：遍历整张图里出现的每个物品，
+    按它的供给曲线补上「第二、第三……来源」的规则节点。候选数 `branches`（0 = 全部），
+    节点上限 `max_nodes`（0 = 不限）。
+    """
     graph = PathGraph(target=_item_key(target))
     graph.nodes[graph.target] = {"label": short(target), "sort": "item"}
     best = min((tree.total_cost for tree in trees if tree.total_cost > 0), default=0.0)
@@ -219,7 +268,14 @@ def to_path_graph(
         root: bool = False,
         best: bool = False,
         total: float = 0.0,
-    ) -> None:
+    ) -> bool:
+        """画这条动作（连同它的下游）。返回是否画出了动作节点。"""
+        if not step.action_id and step.note.startswith("once 前置"):
+            # 「链上游已付过」只是记账占位，没有动作可画。
+            # 画出来会多一个假节点和一条「获得」边；前置关系由调用方的
+            # item → rule 边承担。物品节点仍要登记，否则那条边指向不存在的节点。
+            add_item(step.item, ratio, best)
+            return False
         color = HIGHLIGHT_COLOR if best else route_color(ratio, cap)
         rule_key = _rule_key(step.action_id or f"{step.item}@{id(step)}")
         info = graph.nodes.setdefault(
@@ -255,8 +311,19 @@ def to_path_graph(
         for child in step.children:
             child_key = _item_key(child.item)
             if child.note.startswith("环"):
-                # 环不再画：连边带节点一起省掉，避免图上绕回 target。
-                # 这条前置已经在这条路径的上游出现过，凭空多一条回边只会打结。
+                # 回到本路线已经出现过的一步（`diamond` 拆钻石块，钻石块又要钻石合成）。
+                # 画成不参与层级的虚线，读者才看得出这是「绕一圈」而不是凭空来的来源。
+                add_item(child.item, ratio, best)
+                add_edge(
+                    child_key,
+                    rule_key,
+                    f"needcycle:{child.item}",
+                    _fmt_need(child.need),
+                    f"{child.item} 在本次路线里已经出现过，这一份按它的最优价计",
+                    ratio,
+                    color,
+                    dashed=True,
+                )
                 continue
             emit(child, ratio, best=best)
             add_edge(
@@ -268,6 +335,7 @@ def to_path_graph(
                 ratio,
                 color,
             )
+        return True
 
     # 并列最优只锚定第一条：多条红链会把整张图染满。
     anchor = min(range(len(trees)), key=lambda index: trees[index].rank, default=-1)
@@ -277,9 +345,63 @@ def to_path_graph(
             tree.root,
             ratio,
             root=True,
-            best=len(trees) > 1 and index == anchor,
+            # 单候选也标红：红色表示「这条路」，唯一时它就是那条路。
+            # 不然图是蓝的、对照表 #1 是红的，两处对同一件事给了两个答案。
+            best=index == anchor,
             total=tree.total_cost,
         )
+
+    # 上游候选：给每个「有多个来源」的物品补上第二、第三…条规则。
+    # `branches == 1` 表示每个物品只留最优那一条（等价于旧行为）。
+    if solved is not None and actionset is not None and branches != 1:
+        skipped = _expand_upstream(
+            graph,
+            solved,
+            actionset,
+            trees,
+            branches=branches,
+            max_nodes=max_nodes,
+            depth=depth,
+            emit=emit,
+            ratio_limit=ratio_limit,
+        )
+        for index, (item, hidden) in enumerate(skipped.items()):
+            key = f"omitted::{item}#{index}"
+            count = len(hidden)
+            listed = "\n".join(
+                f"{number}. {_trim(action_id, 44)}"
+                f"（{'依赖自己，不计入' if why == SKIP_CYCLIC else f'{ratio:.1f}×'}）"
+                for number, (action_id, ratio, why) in enumerate(hidden[:6], start=1)
+            )
+            if count > 6:
+                listed += f"\n…另 {count - 6} 条"
+            reasons = []
+            for spec in (SKIP_CYCLIC, SKIP_COSTLY):
+                hit = sum(1 for _a, _r, why in hidden if why == spec)
+                if hit:
+                    reasons.append(spec if hit == count else f"{spec} {hit} 条")
+            graph.nodes[key] = {
+                "label": f"还有 {count} 条候选\n未画（见 tooltip）",
+                "sort": "omitted",
+                "tooltip": (
+                    f"{item} 还有 {count} 条候选没画（"
+                    + "，".join(reasons)
+                    + "）。\n按代价从低到高：\n"
+                    + listed
+                ),
+            }
+            add_edge(
+                key,
+                _item_key(item),
+                f"omitted:{index}",
+                f"{count} 条",
+                graph.nodes[key]["tooltip"],
+                1.0,
+                "#fb923c",
+                dashed=True,
+            )
+        if skipped:
+            graph.omitted = {item: len(hidden) for item, hidden in skipped.items()}
 
     # 剪掉环之后可能剩下没有边的节点（整条链都只是回边），一并清掉。
     connected = {source for source, _, _ in graph.edges} | {
@@ -289,3 +411,120 @@ def to_path_graph(
         del graph.nodes[key]
 
     return graph
+
+
+def _has_drawn_source(graph: PathGraph, item: str) -> bool:
+    """这个物品在图里有没有实线来源（虚线只是「还有候选没画」的计数）。"""
+    key = _item_key(item)
+    return any(
+        destination == key and tag not in graph.dashed
+        for _source, destination, tag in graph.edges
+    )
+
+
+def _has_cycle(step: Step) -> bool:
+    """这条候选的依赖里回到了自己（`diamond` → `diamond_block` → `diamond`）。
+
+    这种候选的成本靠「自己给自己供货」算出来，画出来会剩一个没有入边的合成节点，
+    看起来像上游真实存在的一步。整条不画，只留候选计数。
+    """
+    return has_cycle(step)
+
+
+def self_serving(tree: PathTree) -> bool:
+    """这条路线要靠自己供货（依赖成环），报价不成立：不可画，也不该拿来比价。"""
+    return _has_cycle(tree.root)
+
+
+def _expand_upstream(
+    graph: PathGraph,
+    solved,
+    actionset,
+    trees: list[PathTree],
+    *,
+    branches: int,
+    max_nodes: int,
+    depth: int,
+    emit,
+    ratio_limit: float = 0.0,
+) -> dict[str, list[tuple[str, float, str]]]:
+    """按广度遍历已有树里的每个物品，补上它自己的候选来源。
+
+    节点跨路线共享（key 是 `action_id`），所以「补一次」等价于补到所有出现处；
+    `expanded` 防止同一物品被反复展开。返回**每个物品没画出来的候选**
+    `[(action_id, 相对最优的倍数, 原因), ...]`，供图上的「还有 N 条候选」节点列明细。
+
+    `ratio_limit > 0` 时只画「贵不到这么多倍」的候选：差十倍的来源画上去只是噪音，
+    还会把图撑到几千像素宽。依赖回到自己的候选一律不画（见 `_has_cycle`）。
+    """
+    queue: deque[tuple[str, float, float, frozenset[str]]] = deque()
+    expanded: set[str] = set()
+    skipped: dict[str, list[tuple[str, float, str]]] = {}
+    cyclic = SKIP_CYCLIC
+    costly = SKIP_COSTLY
+
+    def enqueue(step: Step, ratio: float, stack: frozenset[str]) -> None:
+        for child in step.children:
+            if child.note.startswith("环"):
+                continue
+            queue.append((child.item, child.need, ratio, stack | {step.item}))
+            enqueue(child, ratio, stack | {step.item})
+
+    baseline = trees[0].total_cost if trees else 0.0
+    for tree in trees:
+        ratio = tree.total_cost / baseline if baseline > 0 else 1.0
+        enqueue(tree.root, ratio, frozenset())
+
+    while queue:
+        item, need, ratio, stack = queue.popleft()
+        if item in expanded or item in stack:
+            continue
+        expanded.add(item)
+        curve = solved.curve_of(item)
+        if len(curve.segments) < 2:
+            continue
+        head = curve.head
+        best_local = (
+            head.unit_cost * min(need, head.capacity) + head.fixed_cost if head else 0.0
+        )
+        candidates = curve.segments[1:]
+        if branches > 0:
+            candidates = candidates[: branches - 1]
+
+        def local_ratio_of(segment) -> float:
+            cost = segment.unit_cost * min(need, segment.capacity) + segment.fixed_cost
+            return cost / best_local if best_local > 0 else 1.0
+
+        # 最优那段的动作画不出来（原料全回到自己）时，这个物品在图上是悬空的：
+        # 放宽阈值，至少留一条真实来源，贵也总比没有来源强。
+        need_a_source = not _has_drawn_source(graph, item)
+
+        for index, seg in enumerate(candidates):
+            local_ratio = local_ratio_of(seg)
+            if (ratio_limit and local_ratio > ratio_limit and not need_a_source) or (
+                max_nodes and len(graph.nodes) >= max_nodes
+            ):
+                skipped.setdefault(item, []).extend(
+                    (rest.action_id, local_ratio_of(rest), costly)
+                    for rest in candidates[index:]
+                )
+                break
+            step = build_step(
+                actionset,
+                solved,
+                item,
+                seg,
+                need,
+                depth=depth,
+                stack=stack,
+                seen_once=set(),
+            )
+            if _has_cycle(step):
+                skipped.setdefault(item, []).append(
+                    (seg.action_id, local_ratio, cyclic)
+                )
+                continue
+            emit(step, local_ratio, best=False)
+            need_a_source = False
+            enqueue(step, local_ratio, stack)
+    return skipped

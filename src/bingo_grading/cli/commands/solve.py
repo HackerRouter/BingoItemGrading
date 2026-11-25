@@ -110,6 +110,52 @@ def cmd_mining(args: argparse.Namespace) -> int:
 
 
 
+def _print_plan_summary(
+    solved,
+    built,
+    *,
+    graph: list[str] | None,
+    out_path: Path | None,
+) -> None:
+    """`plan` 的终端摘要：结论 + 动作链摘要 + 产物路径。
+
+    完整诊断（曲线、假设、剪枝、来源、缺口）体量在百 KB 级，默认只写盘。
+    """
+    plan = solved.plan
+    demand = f"{plan.demand:g} 个"
+    if plan.feasible:
+        head = (
+            f"{plan.target}  {demand} → {plan.cost:.2f} TU"
+            f"（{plan.score} 分 / 第 {plan.tier} 档）"
+        )
+    else:
+        head = f"{plan.target}  {demand} → 不可行：{plan.missing or '未知原因'}"
+    print(head)
+    print(
+        f"  分项  local {plan.local_cost:.2f} + per_use {plan.per_use_cost:.2f}"
+        f" + once {plan.once_cost:.2f}（共享省 {plan.shared_saving:.2f}）"
+    )
+    steps = plan.steps
+    if steps:
+        shown = "、".join(
+            f"{step.action_id} ×{step.invocations:g}" for step in steps[:4]
+        )
+        tail = f" 等 {len(steps)} 个动作" if len(steps) > 4 else ""
+        print(f"  动作  {shown}{tail}")
+    if graph:
+        print(f"  图    {'、'.join(graph)}")
+    diag = [
+        f"剪枝 {len(solved.pruned)}",
+        f"假设 {len(built.assumptions)}",
+        f"来源 {len(built.provenance)}",
+        f"缺口 {built.extras.get('uncovered_total', 0)}",
+    ]
+    if out_path is not None:
+        print(f"  诊断  {out_path}（{'，'.join(diag)}）")
+    else:
+        print(f"  诊断  {'，'.join(diag)}；加 --out PATH 存完整 JSON，--json 打到终端")
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     """按供给曲线算某件物品的获得路线（含前置分层与竞争）。
 
@@ -178,7 +224,15 @@ def cmd_plan(args: argparse.Namespace) -> int:
                     )
                 ]
             written = write_route_graph(
-                Path(args.graph_out), trees, args.item, frontiers=rows
+                Path(args.graph_out),
+                trees,
+                args.item,
+                frontiers=rows,
+                solved=solved,
+                actionset=actionset,
+                branches=max(0, int(getattr(args, "graph_branches", 3))),
+                max_nodes=max(0, int(getattr(args, "graph_max_nodes", 500))),
+                ratio_limit=float(getattr(args, "graph_branch_ratio", 1.5) or 0.0),
             )
             payload["graph"] = {"out": written, "paths": len(trees)}
         else:
@@ -199,7 +253,25 @@ def cmd_plan(args: argparse.Namespace) -> int:
     ):
         if key in built.extras:
             payload[key] = built.extras[key]
-    print_json(payload)
+    out_path = Path(args.out) if getattr(args, "out", None) else None
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True),
+            encoding="utf-8",
+        )
+    if getattr(args, "json", False):
+        print_json(payload)
+    else:
+        _print_plan_summary(
+            solved,
+            built,
+            graph=(payload.get("graph") or {}).get("out") or None,
+            out_path=out_path,
+        )
+        if payload.get("paths_text"):
+            print()
+            print(payload["paths_text"])
     return 0 if solved.plan.feasible else 1
 
 

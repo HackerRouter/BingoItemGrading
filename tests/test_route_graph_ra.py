@@ -7,7 +7,8 @@ from dataclasses import replace
 import pytest
 
 from bingo_grading import route_graph_ra
-from bingo_grading.plan.explain import PathTree, Step
+from bingo_grading.plan import MODE_PER_USE, Action, ActionSet, Requirement, solve
+from bingo_grading.plan.explain import PathTree, Step, rank_paths
 from bingo_grading.route_graph_ra.colors import (
     BEST_COLOR,
     HIGHLIGHT_COLOR,
@@ -140,8 +141,25 @@ def test_once_child_is_not_folded_into_unit_price() -> None:
     root = replace(root, children=(replace(state, once=True),))
     graph = route_graph_ra.to_path_graph([_tree(1, 365.0, root)], "minecraft:x")
     tooltip = graph.nodes["rule::use"]["tooltip"]
-    assert "一次性前置：capability:state" in tooltip
+    # 这笔一次性开销已逐笔列在固定行里，不再单起一行重复。
+    assert "固定 = state 341.90" in tooltip
+    assert "一次性前置" not in tooltip
     assert "本动作 -" not in tooltip
+
+
+def test_once_child_without_amount_is_still_named() -> None:
+    """once 前置若没在固定成本里占钱（别处已付），仍要报出名字，否则读者以为它免费。"""
+    state = _step("capability:state", "make_state", cost=0.0)
+    root = _step(
+        "minecraft:x",
+        "use",
+        cost=23.1,
+        children=(replace(state, once=True),),
+        own_unit_cost=23.1,
+    )
+    graph = route_graph_ra.to_path_graph([_tree(1, 23.1, root)], "minecraft:x")
+    tooltip = graph.nodes["rule::use"]["tooltip"]
+    assert "一次性前置：capability:state" in tooltip
 
 
 def test_label_shows_whole_cost() -> None:
@@ -218,19 +236,33 @@ def test_only_one_highlight_among_many_candidates() -> None:
 
 
 def test_action_preconditions_are_not_highlighted() -> None:
-    """一个动作的多个前置是 AND，不能挑其中一条标红。"""
+    """一个动作的多个前置是 AND，不能挑其中一条单独标红——它们同色。"""
     root = _step(
         "minecraft:x",
         "loot:end_cities",
         children=(_step("minecraft:a", "travel:a"), _step("minecraft:b", "travel:b")),
     )
     graph = route_graph_ra.to_path_graph([_tree(1, 10.0, root)], "minecraft:x")
-    assert HIGHLIGHT_COLOR not in graph.edge_colors.values()
-    assert graph.edge_colors[("item::minecraft:a", "rule::loot:end_cities", "need:travel:a")] == BEST_COLOR
+    first = graph.edge_colors[("item::minecraft:a", "rule::loot:end_cities", "need:travel:a")]
+    second = graph.edge_colors[("item::minecraft:b", "rule::loot:end_cities", "need:travel:b")]
+    assert first == second
+    # 两条都是候选意义上的最优（同一棵树），不存在「只红一条」的假决策
+    assert HIGHLIGHT_COLOR not in {first, second} or first == second
 
 
-def test_cycle_child_is_dropped() -> None:
-    """路径上已经出现过的前置直接不画：不回边、也不留孤立节点。"""
+def test_competing_candidates_still_only_one_red() -> None:
+    """多候选时红色仍只给成本最低的那条，其余走浓淡。"""
+    trees = [
+        _tree(1, 10.0, _step("minecraft:x", "a")),
+        _tree(2, 30.0, _step("minecraft:x", "b")),
+    ]
+    graph = route_graph_ra.to_path_graph(trees, "minecraft:x")
+    assert graph.edge_colors[("rule::a", "item::minecraft:x", "yield:a")] == HIGHLIGHT_COLOR
+    assert graph.edge_colors[("rule::b", "item::minecraft:x", "yield:b")] != HIGHLIGHT_COLOR
+
+
+def test_cycle_child_becomes_a_dashed_back_edge() -> None:
+    """路径上已经出现过的前置画成不参与层级的虚线回边：节点不重建，但关系看得见。"""
     root = _step(
         "minecraft:x",
         "craft:block",
@@ -243,8 +275,10 @@ def test_cycle_child_is_dropped() -> None:
         ),
     )
     graph = route_graph_ra.to_path_graph([_tree(1, 10.0, root)], "minecraft:x")
-    assert not [key for key in graph.edges if key[2] == "need:loot:ore"]
-    assert not graph.dashed
+    back = ("item::minecraft:x", "rule::craft:block", "needcycle:minecraft:x")
+    assert back in graph.edges
+    assert back in graph.dashed, "回边不能参与层级计算，否则会把 target 推离最底部"
+    # 环上的动作不另建节点：那一步已经在同一页里画过
     assert "rule::loot:ore" not in graph.nodes
     # target 自己没有出边，但必须留着
     assert "item::minecraft:x" in graph.nodes
@@ -292,12 +326,213 @@ def test_whole_best_route_is_highlighted() -> None:
     assert graph.edge_colors[("item::minecraft:pickaxe", "rule::loot:chest", "need:craft:pickaxe#0")] != HIGHLIGHT_COLOR
 
 
-def test_single_route_is_not_highlighted(tmp_path) -> None:
-    """只有一条路线时没有比较，不标红。"""
+def test_paid_once_placeholder_is_not_drawn() -> None:
+    """「once 前置，链上游已付过」是记账占位，不该变成节点 + 一条「获得」边。"""
+    paid = Step(
+        item="capability:lava_access",
+        action_id="",
+        unit_cost=0.0,
+        need=1.0,
+        calls=0.0,
+        subtotal=0.0,
+        note="once 前置，链上游已付过",
+    )
+    root = _step("minecraft:x", "make", cost=5.0, children=(paid,))
+    graph = route_graph_ra.to_path_graph([_tree(1, 5.0, root)], "minecraft:x")
+    assert not [key for key in graph.nodes if "capability:lava_access@" in key]
+    # 前置关系仍保留：item → rule
+    assert (
+        "item::capability:lava_access",
+        "rule::make",
+        "need:capability:lava_access",
+    ) in graph.edges
+    # 没有「获得」边连到那个占位（只有 target 的候选边与前置边）
+    assert not [
+        key for key in graph.edges if key[0].startswith("rule::capability:lava_access@")
+    ]
+
+
+def test_upstream_candidates_are_expanded() -> None:
+    """上游物品有第二个来源时，图上要出现第二条规则（item 节点两条入边）。"""
+    actionset = ActionSet(
+        "branch",
+        (
+            Action(
+                "make",
+                "minecraft:t",
+                1.0,
+                {"minecraft:t": 1.0},
+                requires=(Requirement("minecraft:p", 1.0, MODE_PER_USE),),
+            ),
+            Action("p1", "minecraft:p", 1.0, {"minecraft:p": 1.0}),
+            Action("p2", "minecraft:p", 4.0, {"minecraft:p": 1.0}),
+        ),
+    )
+    solved = solve(actionset, "minecraft:t", 1.0, prune_dominated=False)
+    trees = rank_paths(actionset, solved, "minecraft:t", limit=1)
+    plain = route_graph_ra.to_path_graph(trees, "minecraft:t")
+    assert "rule::p2" not in plain.nodes
+
+    branched = route_graph_ra.to_path_graph(
+        trees, "minecraft:t", solved=solved, actionset=actionset, branches=0
+    )
+    assert "rule::p2" in branched.nodes
+    assert ("rule::p2", "item::minecraft:p", "yield:p2") in branched.edges
+    # 最优那条仍标红，候选走浓淡
+    assert branched.edge_colors[("rule::p1", "item::minecraft:p", "yield:p1")] == HIGHLIGHT_COLOR
+    assert branched.edge_colors[("rule::p2", "item::minecraft:p", "yield:p2")] != HIGHLIGHT_COLOR
+
+
+def test_branch_expansion_respects_the_node_budget() -> None:
+    """`max_nodes` 到时停止补候选，并留一个显式的「还有 N 条」节点。"""
+    actionset = ActionSet(
+        "budget",
+        (
+            Action(
+                "make",
+                "minecraft:t",
+                1.0,
+                {"minecraft:t": 1.0},
+                requires=(Requirement("minecraft:p", 1.0, MODE_PER_USE),),
+            ),
+            Action("p1", "minecraft:p", 1.0, {"minecraft:p": 1.0}),
+            *(
+                Action(f"p{i}", "minecraft:p", float(i), {"minecraft:p": 1.0})
+                for i in range(2, 8)
+            ),
+        ),
+    )
+    solved = solve(actionset, "minecraft:t", 1.0, prune_dominated=False)
+    trees = rank_paths(actionset, solved, "minecraft:t", limit=1)
+    graph = route_graph_ra.to_path_graph(
+        trees, "minecraft:t", solved=solved, actionset=actionset, branches=0, max_nodes=4
+    )
+    assert graph.omitted
+    assert any("还有" in info.get("label", "") and "候选" in info.get("label", "")
+               for info in graph.nodes.values())
+
+
+def test_self_serving_step_keeps_its_own_edge() -> None:
+    """原料绕回祖先的动作仍要画：回边画成虚线，报价与图上所示来源才对得上。"""
+    actionset = ActionSet(
+        "cycle",
+        (
+            Action("p1", "minecraft:p", 1.0, {"minecraft:p": 1.0}),
+            Action(
+                "p2",
+                "minecraft:p",
+                1.2,
+                {"minecraft:p": 1.0},
+                requires=(Requirement("minecraft:q", 1.0, MODE_PER_USE),),
+            ),
+            Action(
+                "q1",
+                "minecraft:q",
+                1.0,
+                {"minecraft:q": 1.0},
+                requires=(Requirement("minecraft:p", 1.0, MODE_PER_USE),),
+            ),
+            Action("q2", "minecraft:q", 40.0, {"minecraft:q": 1.0}),
+        ),
+    )
+    solved = solve(actionset, "minecraft:p", 1.0, prune_dominated=False)
+    trees = rank_paths(actionset, solved, "minecraft:p", limit=3)
+    assert any(tree.root.action_id == "p2" for tree in trees), "自指候选必须真的出现在候选里"
+    graph = route_graph_ra.to_path_graph(
+        trees,
+        "minecraft:p",
+        solved=solved,
+        actionset=actionset,
+        branches=0,
+        ratio_limit=1.5,
+    )
+    # q1 的 p 前置是绕回 target 的一步：动作照画，回边虚线。
+    assert "rule::q1" in graph.nodes
+    back = ("item::minecraft:p", "rule::q1", "needcycle:minecraft:p")
+    assert back in graph.edges
+    assert back in graph.dashed
+    # q 有实线来源后，贵的 q2 仍按阈值拦掉，不因「没人画」而误放。
+    assert "rule::q2" not in graph.nodes
+
+
+def test_omitted_node_lists_the_hidden_candidates() -> None:
+    """「还有 N 条候选」的 tooltip 要列出具体是哪几条、各贵多少倍。"""
+    actionset = ActionSet(
+        "budget",
+        (
+            Action(
+                "make",
+                "minecraft:t",
+                1.0,
+                {"minecraft:t": 1.0},
+                requires=(Requirement("minecraft:p", 1.0, MODE_PER_USE),),
+            ),
+            Action("p1", "minecraft:p", 1.0, {"minecraft:p": 1.0}),
+            Action("p2", "minecraft:p", 100.0, {"minecraft:p": 1.0}),
+        ),
+    )
+    solved = solve(actionset, "minecraft:t", 1.0, prune_dominated=False)
+    trees = rank_paths(actionset, solved, "minecraft:t", limit=1)
+    graph = route_graph_ra.to_path_graph(
+        trees, "minecraft:t", solved=solved, actionset=actionset,
+        branches=0, ratio_limit=1.5,
+    )
+    omitted = [info for info in graph.nodes.values() if info.get("sort") == "omitted"]
+    assert len(omitted) == 1
+    tooltip = omitted[0]["tooltip"]
+    assert "p2" in tooltip
+    assert "100.0×" in tooltip
+    # 换行分成多行，不是一长串
+    assert tooltip.count("\n") >= 2
+
+
+def test_self_serving_candidate_is_not_drawn() -> None:
+    """依赖回到自己的候选不画：`diamond` 走「钻石块分解」时，钻石块又要钻石合成。
+
+    画出来只剩一个没有入边的合成节点，位置比真正的来源更靠上游，看着像上游的一步。
+    """
+    actionset = ActionSet(
+        "cycle",
+        (
+            Action(
+                "make",
+                "minecraft:t",
+                1.0,
+                {"minecraft:t": 1.0},
+                requires=(Requirement("minecraft:p", 1.0, MODE_PER_USE),),
+            ),
+            Action("p1", "minecraft:p", 1.0, {"minecraft:p": 1.0}),
+            Action(
+                "p2",
+                "minecraft:p",
+                5.0,
+                {"minecraft:p": 1.0},
+                requires=(Requirement("minecraft:t", 1.0, MODE_PER_USE),),
+            ),
+        ),
+    )
+    solved = solve(actionset, "minecraft:t", 1.0, prune_dominated=False)
+    trees = rank_paths(actionset, solved, "minecraft:t", limit=1)
+    graph = route_graph_ra.to_path_graph(
+        trees, "minecraft:t", solved=solved, actionset=actionset, branches=0
+    )
+    assert "rule::p2" not in graph.nodes
+    assert "item::minecraft:t" in graph.nodes and "rule::p1" in graph.nodes
+    # 不静默丢：留计数节点，tooltip 说清是「依赖自己」而不是「太贵」。
+    tooltip = next(
+        info["tooltip"] for info in graph.nodes.values() if info.get("sort") == "omitted"
+    )
+    assert "依赖自己" in tooltip
+    assert "贵过阈值" not in tooltip
+
+
+def test_single_route_is_highlighted() -> None:
+    """只有一条路线时整条标红：红色表示「这条路」，与对照表 #1 的色块一致。"""
     graph = route_graph_ra.to_path_graph(
         [_tree(1, 10.0, _step("minecraft:x", "mine:ore"))], "minecraft:x"
     )
-    assert HIGHLIGHT_COLOR not in graph.edge_colors.values()
+    assert graph.edge_colors[("rule::mine:ore", "item::minecraft:x", "yield:mine:ore")] == HIGHLIGHT_COLOR
+    assert graph.nodes["rule::mine:ore"]["border"] == HIGHLIGHT_COLOR
 
 
 def test_same_price_routes_keep_one_red_marker(tmp_path) -> None:

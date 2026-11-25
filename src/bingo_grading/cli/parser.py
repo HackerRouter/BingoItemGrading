@@ -141,6 +141,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan.add_argument("--expand", action="store_true", help="展开步骤、前置与逐层曲线")
     plan.add_argument(
+        "--out",
+        metavar="PATH",
+        help=(
+            "把完整诊断写入 PATH（UTF-8 JSON：曲线、假设、剪枝、来源、缺口）。"
+            "终端默认只打摘要"
+        ),
+    )
+    plan.add_argument(
+        "--json",
+        action="store_true",
+        help="把完整诊断打到终端（机器可读；想看人话摘要不加这个）",
+    )
+    plan.add_argument(
         "--paths",
         action="store_true",
         help="列出目标物品的最优/次优完整链（含每一层的原料与单价）",
@@ -189,6 +202,36 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "合成图附「前置替换成本」表：禁用某前置当前的来源后重算整条路线，"
             "列出差额最大的前 N 处（默认 8，0 关闭）"
+        ),
+    )
+    plan.add_argument(
+        "--graph-branches",
+        type=int,
+        default=3,
+        metavar="N",
+        help=(
+            "每个物品最多画几条候选来源（默认 3 = 最优 + 2 个备选）。"
+            "0 = 全部（大物品会到几百个节点、渲染十几秒）；1 = 只画最优"
+        ),
+    )
+    plan.add_argument(
+        "--graph-max-nodes",
+        type=int,
+        default=500,
+        metavar="N",
+        help=(
+            "节点总数上限（默认 500，0 = 不限）。超出的候选不画，"
+            "画成橙色虚线的「还有 N 条候选」节点"
+        ),
+    )
+    plan.add_argument(
+        "--graph-branch-ratio",
+        type=float,
+        default=1.5,
+        metavar="R",
+        help=(
+            "候选来源只在「贵不到 R 倍」时才画（默认 1.5）。"
+            "差几倍的来源画上去只是噪音，还会把图撑到几千像素宽；0 = 不限"
         ),
     )
     plan.set_defaults(handler=cmd_plan)

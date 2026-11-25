@@ -157,6 +157,14 @@ class PathTree:
         return out
 
 
+def has_cycle(step: "Step") -> bool:
+    """这条路线里有「要用的东西正是它在造的」那一段（钻石块 ↔ 钻石这类互逆配方）。"""
+    for child in step.children:
+        if child.note.startswith("环") or has_cycle(child):
+            return True
+    return False
+
+
 def _best_segment(solved: Solved, item: str, need: float = 1.0) -> Segment | None:
     """取 `need` 件时方案层实际会走的那一段（按总价，不是按单价）。"""
     curve = solved.curve_of(item)
@@ -190,7 +198,7 @@ def _step(
             subtotal=need * seg.unit_cost,
             label=seg.label,
             fixed=seg.fixed,
-            note="环：这条路径上已经出现过，不再展开",
+            note="环：这一份要绕回本路线自己（按最优价计），多绕一圈不合算",
             own_unit_cost=seg.unit_cost,
         )
     if depth <= 0:

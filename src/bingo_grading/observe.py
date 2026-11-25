@@ -18,6 +18,7 @@ import math
 from bingo_grading import units
 from bingo_grading.grade import _display_width
 from bingo_grading.plan import SupplyError
+from bingo_grading.plan.explain import MAX_DEPTH, _step, has_cycle
 
 
 def _charge_dict(charge) -> dict:
@@ -165,6 +166,38 @@ def neighbours(prices: dict[str, float], item: str, limit: int = 5) -> list[dict
     ]
 
 
+def _self_serving(actionset, solved, item: str, segments, demand: float) -> list[dict]:
+    """哪些来源的成本里含「要先用它自己」的一份。
+
+    钻石块 ↔ 钻石这类互逆配方：分解钻石块得到的钻石，成本里有一份是「先合成这个
+    钻石块」，而合成它的钻石又得从这条路线上来。报价不是假的（锚定在外部的钻石价），
+    但多绕一圈必然不合算，永远不该被选，所以单独列出来而不是混在候选里。
+    """
+    out = []
+    for segment in segments:
+        step = _step(
+            actionset,
+            solved,
+            item,
+            segment,
+            demand,
+            depth=MAX_DEPTH,
+            stack=frozenset(),
+            seen_once=set(),
+        )
+        if not has_cycle(step):
+            continue
+        out.append(
+            {
+                "action_id": segment.action_id,
+                "unit_cost": round(segment.unit_cost, 4),
+                "fixed_cost": round(segment.fixed_cost, 4),
+                "label": segment.label,
+            }
+        )
+    return out
+
+
 def report_node(
     actionset,
     solved,
@@ -197,6 +230,9 @@ def report_node(
     }
     if neighbours_of is not None:
         node["neighbours"] = [dict(entry) for entry in neighbours_of]
+    looping = _self_serving(actionset, solved, item, curve.segments, demand)
+    if looping:
+        node["self_serving"] = looping
     return node
 
 
@@ -276,6 +312,18 @@ def render(nodes: list[dict]) -> str:
                     ).rstrip()
                 )
             lines.append("")
+    looping = [node for node in nodes if node.get("self_serving")]
+    if looping:
+        lines.append("")
+        lines.append("## 绕回自身的来源（成本含一份自我供给，永远不合算）")
+        lines.append("")
+        for node in looping:
+            lines.append(node["item"])
+            for entry in node["self_serving"]:
+                lines.append(
+                    "  %s  %.4f TU/个，固定 %.4f"
+                    % (entry["action_id"], entry["unit_cost"], entry["fixed_cost"])
+                )
     return "\n".join(lines).rstrip()
 
 
