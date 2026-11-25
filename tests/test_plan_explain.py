@@ -45,6 +45,22 @@ def test_paths_are_ranked_by_price(solved_bundle) -> None:
     assert trees[1].rank_gap > 0
 
 
+def test_same_price_sources_share_a_rank() -> None:
+    """两条来源同价时名次并列（1、1、3）；近价仍按位置排名。"""
+    actionset = ActionSet(
+        "tie",
+        (
+            Action("a", "minecraft:x", 2.0, {"minecraft:x": 1.0}),
+            Action("b", "minecraft:x", 2.0, {"minecraft:x": 1.0}),
+            Action("c", "minecraft:x", 3.0, {"minecraft:x": 1.0}),
+        ),
+    )
+    solved = solve(actionset, "minecraft:x", 1.0, prune_dominated=False)
+    trees = rank_paths(actionset, solved, "minecraft:x", limit=3)
+    assert [tree.rank for tree in trees] == [1, 1, 3]
+    assert [tree.rank_gap for tree in trees] == [0.0, 0.0, 1.0]
+
+
 def test_second_best_shows_the_extra_step(solved_bundle) -> None:
     """木板上游换成 `oak_wood` 时，链里要能看见「4 原木 → 3 木」的额外一步。"""
     actionset, solved = solved_bundle
@@ -95,10 +111,12 @@ def test_once_prerequisites_are_counted_once() -> None:
     solved = solve(actionset, "minecraft:oak_planks", 1.0)
     trees = rank_paths(actionset, solved, "minecraft:oak_planks", limit=1)
     rows = [line for line in render(trees).splitlines() if "capability:village" in line]
-    assert len(rows) > 1  # 确实重复出现了
-    # 只有一行带非零本步成本，其余都是「已付过」占位
-    paid = [row for row in rows if "0.0000 TU/个，本步 0.0000" not in row]
+    assert len(rows) > 1  # 链上重复出现
+    # 只有一处真的付了钱
+    paid = [row for row in rows if "本步 5.0000" in row]
     assert len(paid) == 1
+    # 到岸价 = 木板 1 + 原木 1 + 村庄 5；村庄只算一次
+    assert trees[0].total_cost == pytest.approx(7.0)
 
 
 def test_paths_render_mentions_every_step(solved_bundle) -> None:

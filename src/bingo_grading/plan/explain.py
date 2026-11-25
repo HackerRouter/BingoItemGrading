@@ -24,11 +24,11 @@ minecraft:oak_planks  #2  0.3458 TU
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from bingo_grading.plan.actions import MODE_ONCE, Action, ActionSet, ActionError
 from bingo_grading.plan.solve import Solved
-from bingo_grading.plan.supply import Segment, SupplyError
+from bingo_grading.plan.supply import Segment, SupplyError, merge_fixed
 
 MAX_DEPTH = 10
 
@@ -59,6 +59,11 @@ class Step:
     fixed: tuple[tuple[str, float], ...] = ()
     children: tuple["Step", ...] = ()
     note: str = ""
+    # 本动作自身的每件耗时（`action.cost ÷ 单次产出`）。`unit_cost` 里已经折进了
+    # `per_use` 前置的边际，展示时要能和它们分开，否则读者没法核对单价。
+    own_unit_cost: float = 0.0
+    # 这一层是 `once` 前置（工具、状态）：整笔进固定成本，不参与单价。
+    once: bool = False
 
     def as_dict(self) -> dict:
         out = {
@@ -186,6 +191,7 @@ def _step(
             label=seg.label,
             fixed=seg.fixed,
             note="环：这条路径上已经出现过，不再展开",
+            own_unit_cost=seg.unit_cost,
         )
     if depth <= 0:
         return Step(
@@ -198,6 +204,7 @@ def _step(
             label=seg.label,
             fixed=seg.fixed,
             note="递归深度用尽，下游未展开",
+            own_unit_cost=seg.unit_cost,
         )
     if seg.members:
         children = []
@@ -230,6 +237,7 @@ def _step(
             fixed=seg.fixed,
             children=tuple(children),
             note="这些来源玩家不知道会先碰到哪个，按速度相加",
+            own_unit_cost=seg.unit_cost,
         )
     try:
         action = actionset.get(seg.action_id)
@@ -244,6 +252,7 @@ def _step(
             label=seg.label,
             fixed=seg.fixed,
             note="这个段不是单个动作（找不到同名动作），下游未展开",
+            own_unit_cost=seg.unit_cost,
         )
     return _from_action(
         actionset,
@@ -255,6 +264,7 @@ def _step(
         depth=depth,
         stack=stack | {item},
         seen_once=seen_once,
+        fixed=seg.fixed,
     )
 
 
@@ -269,6 +279,7 @@ def _from_action(
     depth: int,
     stack: frozenset[str],
     seen_once: set[str],
+    fixed: tuple[tuple[str, float], ...] = (),
 ) -> Step:
     per_call = action.yields.get(item) or 1.0
     calls = need / per_call
@@ -286,6 +297,7 @@ def _from_action(
                         calls=0.0,
                         subtotal=0.0,
                         note="once 前置，链上游已付过",
+                        once=True,
                     )
                 )
                 continue
@@ -304,21 +316,26 @@ def _from_action(
                     calls=sub_need,
                     subtotal=math.inf,
                     note=f"没有可用来源（{requirement.mode}）",
+                    once=requirement.mode == MODE_ONCE,
                 )
             )
             continue
-        children.append(
-            _step(
-                actionset,
-                solved,
-                requirement.item,
-                sub_seg,
-                sub_need,
-                depth=depth - 1,
-                stack=stack,
-                seen_once=seen_once,
-            )
+        child = _step(
+            actionset,
+            solved,
+            requirement.item,
+            sub_seg,
+            sub_need,
+            depth=depth - 1,
+            stack=stack,
+            seen_once=seen_once,
         )
+        if requirement.mode == MODE_ONCE:
+            child = replace(child, once=True)
+        children.append(child)
+    # `seg.fixed` 是**这一段完整的一次性开销**（含全部上游能力，按名字已去重），
+    # 与 `seg.unit_cost`（含直接前置的边际）一起构成这个节点的「整次」价。
+    # 不要再扣子节点的同名项：那样父节点的数字就凑不出子节点的合计。
     return Step(
         item=item,
         action_id=action.action_id,
@@ -328,8 +345,9 @@ def _from_action(
         subtotal=need * unit_cost,
         label=action.label,
         source=action.source,
-        fixed=tuple(action.overhead),
+        fixed=merge_fixed(tuple(action.overhead), fixed),
         children=tuple(children),
+        own_unit_cost=action.cost / per_call,
     )
 
 
@@ -345,21 +363,31 @@ def rank_paths(
 
     第 k 条只替换**本物品**的那一段，下游各自取最优——所以第 2 条与第 1 条
     的差别就是「第一层换了哪个来源」，正是要展示的东西。
+
+    同价的两段共享同一个 `rank`（名次形如 1、1、3），近价不合并。
     """
     target = item or solved.target
     curve = solved.curve_of(target)
     need = solved.demand
     # 按「凑够 need 件的总价」排序：单价最低的那段可能带着很贵的固定成本，
     # 方案层不会选它，路径树排第一就成了假路线。
-    segments = sorted(curve.segments, key=lambda seg: _seg_total(seg, need))[
-        : max(limit, 1)
-    ]
+    ranked = sorted(curve.segments, key=lambda seg: _seg_total(seg, need))
+    segments = ranked[: max(limit, 1)]
     if not segments:
         return []
     best = _seg_total(segments[0], need)
     trees: list[PathTree] = []
-    for rank, seg in enumerate(segments, start=1):
+    rank = 0
+    previous: float | None = None
+    for position, seg in enumerate(segments, start=1):
         total = _seg_total(seg, need)
+        # 同价的两段共享名次（1、1、3）：名次回答「排在哪个档」，不回答「差多少」。
+        # 近价（只差千分之几）仍按位置排名，差额由 `rank_gap` 承担。
+        if previous is None or not math.isclose(
+            total, previous, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            rank = position
+            previous = total
         root = _step(
             actionset,
             solved,

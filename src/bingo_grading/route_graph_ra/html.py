@@ -17,20 +17,47 @@ from .options import PathOptions
 from .render import build_dot, dot_to_svg
 
 
+def _frontier_table(frontiers: list[dict]) -> str:
+    """「换个前置来源要贵多少」。空表不占位。"""
+    if not frontiers:
+        return ""
+    rows = "".join(
+        f'<tr><td>{html.escape(row["item"].split(":", 1)[-1])}</td>'
+        f'<td>{html.escape(row["action"])}</td>'
+        f'<td>{html.escape(row["alternative"] or "（无替代来源）")}</td>'
+        f'<td>{row["route_total"]:.2f} TU</td>'
+        f'<td>+{row["delta"]:.2f}（+{row["delta_ratio"] * 100:.1f}%）</td></tr>'
+        for row in frontiers
+    )
+    return f"""
+<h2>前置替换成本</h2>
+<div class="sub">
+  口径：禁用该前置当前的来源后<b>重新求解整条路线</b>，差额含固定成本去重与多级依赖的
+  真实变化，不是各层单价相加。「换成什么」是求解器在缺这个来源时的最优选择。
+</div>
+<table><thead><tr><th>前置</th><th>当前来源</th><th>换成什么</th><th>整条路线</th>
+<th>差额</th></tr></thead><tbody>{rows}</tbody></table>
+"""
+
+
 def render_html(
-    svg_text: str, trees: list[PathTree], target: str
+    svg_text: str,
+    trees: list[PathTree],
+    target: str,
+    *,
+    frontiers: list[dict] | None = None,
 ) -> str:
-    """自包含 HTML：内嵌 SVG + 路线对照表。"""
+    """自包含 HTML：内嵌 SVG + 路线对照表 +（可选）前置替换成本表。"""
     best = min((tree.total_cost for tree in trees if tree.total_cost > 0), default=0.0)
     cap = cost_cap(trees, best)
     rows = []
-    for tree in sorted(trees, key=lambda item: item.rank):
+    for index, tree in enumerate(sorted(trees, key=lambda item: item.rank)):
         ratio = tree.total_cost / best if best > 0 else 1.0
-        # 同价的两条路线里只有第一名带红色锚点。
-        chip = route_ink(ratio, cap) if tree.rank == 1 else route_color(ratio, cap)
+        # 并列最优只给第一条红色锚点，其余同价路线见对照表。
+        chip = route_ink(ratio, cap) if index == 0 else route_color(ratio, cap)
         rows.append(
             f'<tr><td>#{tree.rank}</td>'
-            f'<td><span class="chip" style="background:{chip}"></span>{ratio:.2f}×</td>'
+            f'<td><span class="chip" style="background:{chip}"></span>{ratio:.3f}×</td>'
             f"<td>{tree.unit_cost:.2f} TU</td>"
             f"<td>{tree.total_cost:.2f} TU</td>"
             f"<td>{tree.rank_gap:+.2f}</td>"
@@ -39,7 +66,7 @@ def render_html(
     body = "".join(rows)
     if cap > 1.0:
         ramp_note = (
-            f"其余来源按与最优的成本比由浓到浅：本图最差分支（{cap:.2f}×）"
+            f"其余来源按与最优的成本比由浓到浅：本图最差分支（{cap:.3f}×）"
             "用最浅色。"
         )
     else:
@@ -70,9 +97,15 @@ h2 {{ font-size: 14px; margin: 22px 0 8px; }}
   箭头指「来源 → 产物」，从上往下读是一条获取路径，产物沉在整张图最下面。
   <b>椭圆 = 物品</b>：多条入边就是同一物品的多个候选来源（OR）；
   <b>圆角矩形 = 一条动作</b>：多条入边是它的并列前置（AND），缺一不可。
-  <b>红色 = 最优的那条路线</b>（从原料一路走到 target）；
-  连到 target 的边写的是整条路线的<b>整次总成本</b>，其它节点上是<b>单价 × 需要量</b>
-  （`×1/9` 表示一次动作产出 9 件，这里只分摊九分之一）；{ramp_note}
+  <b>红色 = 最优的那条路线</b>（从原料一路走到 target；并列最优只在图上标红第一条，
+  其余同价路线见下方对照表，名次会并列）；
+  每个动作节点的数字写成一条等式：<b>`单价 × 需要量 + 固定 = 整次`</b>。
+  `单价` 已含直接前置的边际（`×1/9` 表示一次动作产出 9 件、这里只分摊九分之一），
+  `固定` 是这一段的固定成本（去村庄、进下界、打一场龙这类只付一次的开销），`整次` 就是凑够这件东西的
+  总价 —— 根节点那个数等于 target 边上标的数字。
+  固定成本按名字去重，同一条路线里只算一次，所以<b>子节点各自相加可能大于父节点</b>：
+  共享的那笔在两处都会展示，但只收一次。
+  <b>把鼠标放到节点上</b>可以看到单价由哪几项折进来、以及哪些固定成本被合并掉了。{ramp_note}
   虚线框是展到深度上限的节点——它的成本已经算进去了，省掉的只是更下游的明细；
   路径上已经出现过的前置（环）直接不画。
 </div>
@@ -80,12 +113,18 @@ h2 {{ font-size: 14px; margin: 22px 0 8px; }}
 <h2>路线对照</h2>
 <table><thead><tr><th>名次</th><th>成本比</th><th>单价</th><th>整次</th>
 <th>比最优</th><th></th></tr></thead><tbody>{body}</tbody></table>
+{_frontier_table(frontiers or [])}
 </body></html>
 """
 
 
 def write_outputs(
-    base: Path, trees: list[PathTree], target: str, *, rankdir: str = "TB"
+    base: Path,
+    trees: list[PathTree],
+    target: str,
+    *,
+    rankdir: str = "TB",
+    frontiers: list[dict] | None = None,
 ) -> list[str]:
     """写 `<base>.dot`，能画 SVG 时再写 `<base>.svg` 与 `<base>.html`。
 
@@ -113,6 +152,9 @@ def write_outputs(
             "DOT 文件已写出，装好 Graphviz 后重新生成即可。</p>"
         )
     html_path = stem.with_suffix(".html")
-    html_path.write_text(render_html(svg_text, trees, target), encoding="utf-8")
+    html_path.write_text(
+        render_html(svg_text, trees, target, frontiers=frontiers),
+        encoding="utf-8",
+    )
     written.append(str(html_path))
     return written

@@ -153,16 +153,41 @@ def per_invocation_cost(charges: Iterable[Charge]) -> float:
     return sum(item.marginal for item in charges if item.mode == MODE_PER_USE)
 
 
+# 「一次性状态」的固定成本名字前缀：同一个名字在整条链上就是同一笔钱。
+# 只有这类名字可以在跨层合并时透传；消耗品（`minecraft:emerald`）不行——
+# 升级用的 12 个和交易用的 24 个是两批，按名字取 max 会把其中一批吃掉。
+_STATE_PREFIXES = ("capability:",)
+
+
+def _is_state(name: str) -> bool:
+    return name.startswith(_STATE_PREFIXES)
+
+
 def fixed_cost_of(charges: Iterable[Charge]) -> tuple[tuple[str, float], ...]:
     """这个动作**第一次**做时要付的固定成本（带名字，同名合并）。
 
-    `once` 前置全额 + `per_use` 前置里的固定部分。带名字的原因是：
-    同一趟村庄可能在「取材料」和「用材料」两处各出现一次，但它是同一笔钱。
+    `once` 前置整笔都是一次性开销，但内部混了两类东西：
+
+    - **状态**（`capability:nether_access`、`capability:dragon_slain`）：同一条
+      链上换个分支又要它，就是同一笔，必须透传名字才能去重；
+    - **消耗品与搜索成本**（`minecraft:emerald`、`find:minecraft:gravel`）：同名
+      不代表同一批货，整笔并进当前名字下，不单独参与合并。
+
+    不做这个区分会两头错：全并进当前名字 → `155.27`（含门 111.29）与另一分支的
+    `nether_access 111.29` 各算一次；全部透传 → `emerald` 的两批被 max 吃掉一批。
     """
-    groups: list[tuple[str, float]] = []
+    groups: list[tuple[tuple[str, float], ...]] = []
     for item in charges:
         if item.mode == MODE_ONCE:
-            groups.append(((item.item, item.cost),))
+            state = tuple(
+                (name, amount) for name, amount in item.fixed_items if _is_state(name)
+            )
+            kept = item.marginal + sum(
+                amount for name, amount in item.fixed_items if not _is_state(name)
+            )
+            groups.append(((item.item, kept),))
+            if state:
+                groups.append(state)
         else:
             groups.append(item.fixed_items)
     return merge_fixed(*groups)

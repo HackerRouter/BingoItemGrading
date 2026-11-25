@@ -12,6 +12,7 @@ from ...case.registry import builder_for
 from ...plan import PlanError, SolveError, SupplyError, TierError
 from ...plan import solve as solve_plan
 from ...plan.explain import rank_paths, render as render_paths
+from ...plan.frontiers import frontiers as frontier_rows
 from ...route_graph_ra import write_outputs as write_route_graph
 from ...mining import MiningError, estimate_from_row
 from ... import grade as grade_module
@@ -160,10 +161,25 @@ def cmd_plan(args: argparse.Namespace) -> int:
             solved,
             args.item,
             limit=max(1, int(getattr(args, "graph_paths", 3))),
-            depth=max(1, int(getattr(args, "graph_depth", 4))),
+            depth=max(1, int(getattr(args, "graph_depth", 16))),
         )
         if trees:
-            written = write_route_graph(Path(args.graph_out), trees, args.item)
+            rows = None
+            limit = max(0, int(getattr(args, "graph_frontiers", 8)))
+            if limit:
+                rows = [
+                    row.as_dict()
+                    for row in frontier_rows(
+                        actionset,
+                        solved,
+                        trees[0],
+                        limit=limit,
+                        prune_dominated=not getattr(args, "no_prune", False),
+                    )
+                ]
+            written = write_route_graph(
+                Path(args.graph_out), trees, args.item, frontiers=rows
+            )
             payload["graph"] = {"out": written, "paths": len(trees)}
         else:
             payload["graph"] = {"out": [], "error": "没有可画的路线"}

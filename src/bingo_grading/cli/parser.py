@@ -174,11 +174,21 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--graph-depth",
         type=int,
-        default=4,
+        default=16,
         metavar="N",
         help=(
-            "合成图向下展开几层前置（默认 4）。超出这一层的节点画成虚线框："
-            "它自己的成本已经计入，只是不再展开更下游的明细"
+            "合成图向下展开几层前置（默认 16，实际会被树的深度封顶）。"
+            "超出这一层的节点画成虚线框：它自己的成本已经计入，只是不再展开更下游的明细"
+        ),
+    )
+    plan.add_argument(
+        "--graph-frontiers",
+        type=int,
+        default=8,
+        metavar="N",
+        help=(
+            "合成图附「前置替换成本」表：禁用某前置当前的来源后重算整条路线，"
+            "列出差额最大的前 N 处（默认 8，0 关闭）"
         ),
     )
     plan.set_defaults(handler=cmd_plan)

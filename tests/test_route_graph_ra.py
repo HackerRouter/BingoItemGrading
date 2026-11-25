@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from bingo_grading import route_graph_ra
@@ -21,6 +23,8 @@ def _step(
     need: float = 1.0,
     children: tuple[Step, ...] = (),
     note: str = "",
+    fixed: tuple[tuple[str, float], ...] = (),
+    own_unit_cost: float = 0.0,
 ) -> Step:
     return Step(
         item=item,
@@ -31,6 +35,8 @@ def _step(
         subtotal=cost * need,
         children=children,
         note=note,
+        fixed=fixed,
+        own_unit_cost=own_unit_cost,
     )
 
 
@@ -72,6 +78,95 @@ def test_rule_label_keeps_cost_and_quantity() -> None:
     assert "2.12 TU ×3" in label
     assert "单价" not in label
     assert "CELLPADDING=\"3\"" in label
+
+
+def test_rule_label_shows_fixed_cost() -> None:
+    """固定成本必须上图，且与单价同一行：只写单价会让「单价低但固定贵」的来源看着更便宜。"""
+    step = _step(
+        "minecraft:x",
+        "cast:x",
+        cost=0.14,
+        need=3.0,
+        fixed=(("capability:lava_access", 48.4),),
+    )
+    graph = route_graph_ra.to_path_graph([_tree(1, 49.0, step)], "minecraft:x")
+    node = graph.nodes["rule::cast:x"]
+    assert "0.14 TU ×3 + 48.40 固定" in node["label"]
+    assert "lava_access 48.4" in node["tooltip"]
+
+
+def test_tooltip_explains_how_the_numbers_add_up() -> None:
+    """悬停要能看出：单价里折进了哪些前置、固定成本合并掉了多少。"""
+    blaze = _step(
+        "minecraft:blaze_powder", "crush", cost=27.5, need=12.0,
+        fixed=(("capability:nether", 155.27),),
+    )
+    pearl = _step(
+        "minecraft:ender_pearl", "roam", cost=13.19, need=12.0,
+        fixed=(("capability:nether", 74.01),),
+    )
+    root = _step(
+        "minecraft:ender_eye",
+        "craft",
+        cost=45.69,
+        need=12.0,
+        children=(blaze, pearl),
+        fixed=(("capability:nether", 155.27),),
+        own_unit_cost=5.0,
+    )
+    graph = route_graph_ra.to_path_graph([_tree(1, 703.55, root)], "minecraft:x")
+    tooltip = graph.nodes["rule::craft"]["tooltip"]
+    # 45.69 = 5.00 自身 + 27.50×1 + 13.19×1（每个末影之眼各要 1 个烈焰粉、1 个珍珠）
+    assert "单价 = 本动作 5.00 + blaze_powder 27.50×1 + ender_pearl 13.19×1" in tooltip
+    # 前置固定 155.27 + 74.01 = 229.28，同名合并后 155.27
+    assert "前置合计 229.28" in tooltip
+    assert "同名只算一次" in tooltip
+    # 图上已经写过的内容不再重复
+    assert "本行" not in tooltip
+    assert "整次（含全部前置）" not in tooltip
+
+
+def test_once_child_is_not_folded_into_unit_price() -> None:
+    """once 前置整笔进固定成本，不能出现在「单价构成」里（否则会算出负数）。"""
+    state = _step("capability:state", "make_state", cost=341.9)
+    root = _step(
+        "minecraft:x",
+        "use",
+        cost=23.1,
+        children=(state,),
+        fixed=(("capability:state", 341.9),),
+        own_unit_cost=23.1,
+    )
+    root = replace(root, children=(replace(state, once=True),))
+    graph = route_graph_ra.to_path_graph([_tree(1, 365.0, root)], "minecraft:x")
+    tooltip = graph.nodes["rule::use"]["tooltip"]
+    assert "一次性前置：capability:state" in tooltip
+    assert "本动作 -" not in tooltip
+
+
+def test_label_shows_whole_cost() -> None:
+    """等式自洽：`单价 × 需要量 + 固定 = 整次`，整次等于 `PathTree.total_cost`。"""
+    child = _step(
+        "minecraft:p",
+        "p1",
+        cost=10.0,
+        fixed=(("capability:shared", 5.0),),
+    )
+    # 真实数据里父节点的 unit_cost 已含子节点的边际，这里同样构造：11 = 自身 1 + 子 10
+    root = _step(
+        "minecraft:x",
+        "make",
+        cost=11.0,
+        need=2.0,
+        children=(child,),
+        fixed=(("capability:shared", 5.0),),
+    )
+    graph = route_graph_ra.to_path_graph([_tree(1, 27.0, root)], "minecraft:x")
+    make = graph.nodes["rule::make"]
+    assert "11.00 TU ×2 + 5.00 固定 = 27.00 整次" in make["label"]
+    # 叶子节点自身就是全部（10 + 5），不另写「整次」
+    assert "10.00 TU ×1 + 5.00 固定" in graph.nodes["rule::p1"]["label"]
+    assert "整次" not in graph.nodes["rule::p1"]["label"]
 
 
 def test_fractional_need_shows_as_reciprocal() -> None:
@@ -206,16 +301,52 @@ def test_single_route_is_not_highlighted(tmp_path) -> None:
 
 
 def test_same_price_routes_keep_one_red_marker(tmp_path) -> None:
-    """同价的两条路线只让第一名带红色锚点，对照表也只一个红块。"""
+    """同价的两条路线只让第一条带红色锚点，对照表名次并列。"""
     trees = [
         _tree(1, 10.0, _step("minecraft:x", "a")),
-        _tree(2, 10.0, _step("minecraft:x", "b")),
+        _tree(1, 10.0, _step("minecraft:x", "b")),
     ]
     graph = route_graph_ra.to_path_graph(trees, "minecraft:x")
     assert graph.edge_colors[("rule::a", "item::minecraft:x", "yield:a")] == HIGHLIGHT_COLOR
     assert graph.edge_colors[("rule::b", "item::minecraft:x", "yield:b")] == BEST_COLOR
     html = route_graph_ra.render_html("<svg></svg>", trees, "minecraft:x")
     assert html.count(HIGHLIGHT_COLOR) == 1
+    assert html.count("<td>#1</td>") == 2
+
+
+def test_frontier_table_renders() -> None:
+    """前置脆弱点表要写清替代来源与整条路线的差额。"""
+    trees = [_tree(1, 10.0, _step("minecraft:x", "a"))]
+    html = route_graph_ra.render_html(
+        "<svg></svg>",
+        trees,
+        "minecraft:x",
+        frontiers=[
+            {
+                "item": "minecraft:p",
+                "action": "p1",
+                "alternative": "p2",
+                "route_total": 15.0,
+                "delta": 3.0,
+                "delta_ratio": 0.3,
+            }
+        ],
+    )
+    assert "前置替换成本" in html
+    assert "p1" in html and "p2" in html
+    assert "+3.00（+30.0%）" in html
+
+
+def test_route_table_shows_three_decimals() -> None:
+    """近价路线在两位小数下都显示 1.00×，对照表要给到千分位。"""
+    trees = [
+        _tree(1, 10.0, _step("minecraft:x", "a")),
+        _tree(2, 10.028, _step("minecraft:x", "b")),
+    ]
+    html = route_graph_ra.render_html("<svg></svg>", trees, "minecraft:x")
+    assert "1.000×" in html
+    assert "1.003×" in html
+    assert "1.00×" not in html
 
 
 def test_root_edge_keeps_its_own_total() -> None:

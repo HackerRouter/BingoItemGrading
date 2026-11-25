@@ -57,16 +57,58 @@ def _note(step: Step) -> str:
     return step.note
 
 
-def _node_label(step: Step) -> str:
-    """动作节点：名称 / 描述 / `单价 TU × 需要量`，HTML table 控制行距。"""
+def _cost_tree(
+    step: Step, cache: dict[int, tuple[float, dict[str, float], float]]
+) -> tuple[float, dict[str, float], float]:
+    """`(节点整次价, 名字→金额, 本节点固定合计)`。
+
+    **不递归**：`unit_cost` 已含直接前置的边际（`per_invocation_cost` 折进去了），
+    `fixed` 已含全部上游能力的一次性开销（`fixed_cost_of` 按名字去重后透传）。
+    所以一个节点的整次价就是 `单价 × 需要量 + 固定`，子节点是它的明细而不是加项。
+    递归相加会把前置算两遍。
+    """
+    key = id(step)
+    if key in cache:
+        return cache[key]
+    names = dict(step.fixed)
+    fixed_total = sum(amount for amount in names.values())
+    total = step.need * step.unit_cost + fixed_total
+    cache[key] = (total, names, fixed_total)
+    return cache[key]
+
+
+def _price_lines(
+    step: Step, cache: dict[int, tuple[float, dict[str, float], float]]
+) -> list[str]:
+    """`单价 × 需要量 [+ 固定] = 整次` 一行写完，等式自洽。
+
+    `整次` 是项目既有口径（`whole_cost_tu`）：凑够 `need` 件的总价，含一次性开销。
+    它**不是**「子节点相加」：`单价` 已含直接前置的边际、`固定` 已含全部上游
+    一次性开销，子节点是它的明细而不是加项。
+    """
+    if not step.unit_cost or not math.isfinite(step.unit_cost):
+        return []
+    total, names, _ = _cost_tree(step, cache)
+    line = f"{step.unit_cost:.2f} TU {_fmt_need(step.need)}"
+    fixed_total = sum(names.values())
+    if fixed_total:
+        line += f" + {fixed_total:.2f} 固定"
+    if step.children and abs(total - step.subtotal) > 1e-9:
+        line += f" = {total:.2f} 整次"
+    return [line]
+
+
+def _node_label(
+    step: Step, cache: dict[int, tuple[float, dict[str, float], float]]
+) -> str:
+    """动作节点：名称 / 描述 / `单价 TU × 需要量 [+ 固定]` / `合计`。"""
     title = step.action_id.replace("minecraft:", "") if step.action_id else short(step.item)
     lines = [title]
     if step.label:
         head = step.label.split("（", 1)[0].strip().replace("minecraft:", "")
         if head:
             lines.append(head[:48] + ("…" if len(head) > 48 else ""))
-    if step.unit_cost and math.isfinite(step.unit_cost):
-        lines.append(f"{step.unit_cost:.2f} TU {_fmt_need(step.need)}")
+    lines.extend(_price_lines(step, cache))
     if step.note:
         lines.append(_note(step))
     rows = "".join(f"<TR><TD>{_html_text(line)}</TD></TR>" for line in lines)
@@ -77,22 +119,51 @@ def _node_label(step: Step) -> str:
     )
 
 
-def _tooltip(step: Step) -> str:
-    pieces = [
-        f"动作：{step.action_id or '（无）'}",
-        f"物品：{step.item}",
-        f"单价：{step.unit_cost:.4g} TU",
-        f"需求：{step.need:g}",
-        f"调用：{step.calls:g}",
-        f"小计：{step.subtotal:.4g} TU",
-    ]
+def _per_unit(need: float, parent_need: float) -> float:
+    """前置总量折算成「每件产物消耗几个」。父需求为 0 时不折算。"""
+    if not parent_need:
+        return need
+    return need / parent_need
+
+
+def _tooltip(
+    step: Step, cache: dict[int, tuple[float, dict[str, float], float]]
+) -> str:
+    """只写图上看不到的东西：单价的分解、固定成本怎么合并的、调用次数、来源全名。
+
+    节点标签上已有的（动作名、描述、`单价 × 需要量 + 固定 = 整次`、备注）不再重复。
+    """
+    _total, names, own_fixed = _cost_tree(step, cache)
+    pieces: list[str] = []
+    per_use = [child for child in step.children if not child.once]
+    once = [child for child in step.children if child.once]
+    if per_use:
+        parts = [f"本动作 {step.own_unit_cost:.2f}"]
+        parts.extend(
+            f"{short(child.item)} {child.unit_cost:.2f}×{_per_unit(child.need, step.need):g}"
+            for child in per_use
+        )
+        pieces.append("单价 = " + " + ".join(parts))
+    if names:
+        detail = " + ".join(
+            f"{name.rsplit(':', 1)[-1]} {amount:.2f}"
+            for name, amount in sorted(names.items())
+        )
+        line = f"固定 = {detail}"
+        children_fixed = sum(_cost_tree(child, cache)[2] for child in step.children)
+        if children_fixed > own_fixed + 1e-9:
+            line += f"（前置合计 {children_fixed:.2f}，同名只算一次）"
+        pieces.append(line)
+    if once:
+        pieces.append("一次性前置：" + "、".join(short(child.item) for child in once))
+    if abs(step.calls - step.need) > 1e-9:
+        pieces.append(f"调用 {step.calls:g} 次")
     if step.source:
-        pieces.append(f"来源：{step.source}")
-    if step.label:
+        pieces.append(step.source)
+    if step.label and len(step.label) > 48:
+        # 图上把 label 截到 48 字，全文只有这里能看到。
         pieces.append(step.label)
-    if step.note:
-        pieces.append(f"备注：{_note(step)}")
-    return "；".join(pieces)
+    return "\n".join(pieces)
 
 
 def to_path_graph(
@@ -105,6 +176,8 @@ def to_path_graph(
     cap = cost_cap(trees, best)
     node_ratio: dict[str, float] = {}
     edge_ratio: dict[tuple[str, str, str], float] = {}
+    # 成本按 Step 对象缓存：同一棵树里的节点各出现一次，跨路线共享时才复用。
+    cost_cache: dict[int, tuple[float, dict[str, float], float]] = {}
 
     def add_item(item: str, ratio: float, best: bool) -> str:
         key = _item_key(item)
@@ -152,10 +225,10 @@ def to_path_graph(
         info = graph.nodes.setdefault(
             rule_key,
             {
-                "label": _node_label(step),
+                "label": _node_label(step, cost_cache),
                 "html": True,
                 "sort": "rule",
-                "tooltip": _tooltip(step),
+                "tooltip": _tooltip(step, cost_cache),
             },
         )
         if step.note:
@@ -174,7 +247,7 @@ def to_path_graph(
             output_key,
             f"yield:{step.action_id}",
             f"{total:.1f} TU" if is_candidate else "获得",
-            _tooltip(step),
+            _tooltip(step, cost_cache),
             ratio,
             color,
         )
@@ -191,18 +264,20 @@ def to_path_graph(
                 rule_key,
                 f"need:{child.action_id or child.item}",
                 "获得" if child.need == 1.0 else _fmt_need(child.need),
-                _tooltip(child),
+                _tooltip(child, cost_cache),
                 ratio,
                 color,
             )
 
-    for tree in trees:
+    # 并列最优只锚定第一条：多条红链会把整张图染满。
+    anchor = min(range(len(trees)), key=lambda index: trees[index].rank, default=-1)
+    for index, tree in enumerate(trees):
         ratio = tree.total_cost / best if best > 0 else 1.0
         emit(
             tree.root,
             ratio,
             root=True,
-            best=len(trees) > 1 and tree.rank == 1,
+            best=len(trees) > 1 and index == anchor,
             total=tree.total_cost,
         )
 

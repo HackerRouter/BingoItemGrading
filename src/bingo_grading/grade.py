@@ -312,6 +312,8 @@ def best_bundle(
     *,
     seen: frozenset[str] = frozenset(),
     memo: dict | None = None,
+    paid: frozenset[str] = frozenset(),
+    top: bool = True,
 ) -> Bundle:
     """**一次买齐** `demands` 里所有物品的最便宜方案。
 
@@ -326,10 +328,21 @@ def best_bundle(
     目标件数少（Bingo 一格 1–3 件）时递归深度很浅，穷举得起。
 
     容量有限的动作用 `capacity` 卡住：一趟给不够的目标不会被这条动作认领。
+
+    `paid` 是**已经付过的一次性状态**（`capability:*`）：两个目标都要「进末地」
+    或「打完一场龙」时只收一次。这是跨动作的共享——`yields` 只覆盖「一个动作
+    同时产出多件」，覆盖不到「两条链共用同一个上游状态」。
+
+    `top` 控制 `paid` 只**在顶层扩展一层**：把 paid 每层都往下扩会让缓存按
+    「已付集合」分片，真实图上组合数爆炸（实测 `pytest` 从 30 s 涨到跑不完）。
+    顶层一层已经覆盖「同一行 Bingo 里两件都要打龙」这个诉求。
     """
     if memo is None:
         memo = {}
-    key = tuple(sorted((item, round(amount, 6)) for item, amount in demands.items()))
+    key = (
+        tuple(sorted((item, round(amount, 6)) for item, amount in demands.items())),
+        tuple(sorted(paid)),
+    )
     if key in memo:
         return memo[key]
     remaining = {item: amount for item, amount in demands.items() if amount > 0}
@@ -361,18 +374,24 @@ def best_bundle(
             # 回到已经用过的动作：这条分支会原地打转。
             continue
         total = sum(amount for _, amount in action.overhead) + action.cost * calls
+        # 本条动作付过的状态要累计下来，同一分支的后续目标（`tail`）才不会再付一次。
+        spent = paid
         for requirement in action.requires:
-            need = (
-                requirement.qty * calls
-                if requirement.mode == MODE_PER_USE
-                else requirement.qty
-            )
+            once = requirement.mode != MODE_PER_USE
+            if once and requirement.item in spent:
+                # 同一场龙战 / 同一趟末地：别的分支已经付过。
+                continue
+            if once and top:
+                spent = spent | {requirement.item}
+            need = requirement.qty * calls if not once else requirement.qty
             sub = best_bundle(
                 actionset,
                 curves,
                 {requirement.item: need},
                 seen=seen | {action.action_id},
                 memo=memo,
+                paid=spent,
+                top=False,
             )
             if sub.cost is None:
                 total = None
@@ -390,7 +409,13 @@ def best_bundle(
         steps = (step,)
         if rest:
             tail = best_bundle(
-                actionset, curves, rest, seen=seen | {action.action_id}, memo=memo
+                actionset,
+                curves,
+                rest,
+                seen=seen | {action.action_id},
+                memo=memo,
+                paid=spent,
+                top=False,
             )
             if tail.cost is None:
                 continue

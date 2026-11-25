@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from bingo_grading import gamedata
+from bingo_grading.plan.actions import MODE_ONCE, MODE_PER_USE
 
 NETHER_ACCESS = "capability:nether_access"
 THE_END_ACCESS = "capability:the_end_access"
@@ -89,6 +90,10 @@ class Construct:
     seconds: float
     label: str
     source: str = "construct"
+    # 这些输入是**一次性状态**（进过一次末地、打完一场龙）：整个方案里只付一次，
+    # 与 `Requirement` 的 `once` 同义。写在 `inputs` 里的名字才能标；未列出的仍按
+    # `per_use` 计价（原料、消耗品）。
+    once_inputs: tuple[str, ...] = ()
     # 「这个输入不许用哪几条来源」：`(输入物品, (来源前缀, ...))`。
     # 不是价格判断，而是**操作上做不到**：把 `Requirement.forbid` 带到构造表里。
     forbid: tuple[tuple[str, tuple[str, ...]], ...] = ()
@@ -109,6 +114,10 @@ class Construct:
             if name == item:
                 return targets
         return ()
+
+    def mode_for(self, item: str) -> str:
+        """这个输入按 `once` 还是 `per_use` 计价。"""
+        return MODE_ONCE if item in self.once_inputs else MODE_PER_USE
 
 
 # 浇铸出来的黑曜石只能用来**从零垒整框**（挖坑、倒水、浇岩浆，一次成型）。
@@ -268,6 +277,8 @@ ENDER_PEARL = "minecraft:ender_pearl"
 GLASS_BOTTLE = "minecraft:glass_bottle"
 DRAGON_BREATH = "minecraft:dragon_breath"
 DRAGON_EGG = "minecraft:dragon_egg"
+# 打死一场末影龙的产物：`dragon_egg` 与 `outer_end`（走折跃门）的公共前置。
+DRAGON_SLAIN = "capability:dragon_slain"
 
 # 末地外岛（末地城、末地船）。进了末地只到主岛，外岛在约 1000 格虚空之外。
 # 两条到达方式各自是一条构造，求解器对同一产物取小；`end:gateway` 顺带出龙蛋。
@@ -286,17 +297,39 @@ END_CONSTRUCTS: tuple[Construct, ...] = (
         label="在要塞的传送门框架上嵌满 12 个末影之眼、跳进去",
         source="game_rule",
     ),
-    # 龙蛋：末影龙死后在返回传送门上方生成，**不是掉落物**。所以成本 = 打赢
-    # 一场龙战（不拆床、不利用瞬时击杀，按正常拆水晶流程）+ 把蛋取走（挖掉或推走，
-    # 都只要一下）。龙战时长 365 s 是 2026-11-23 的实测均值（n=6，窗口从落主岛到
-    # 龙蛋进背包，含摆水晶与复活读秒），原估值 20 分钟是它的 3.3 倍。
+    # 杀龙：摆 4 个水晶复活、清掉柱上水晶、把末影龙打死。**不含**捡蛋。
+    #
+    # 单独建成一个节点，是因为它是「要龙蛋」和「走折跃门去外岛」的**公共前置**：
+    # 同一行 Bingo 里两件都要时，这笔只该付一次。拆开之前两条构造各自内联 365 s，
+    # 组合计价会把同一场龙战算两遍。
+    #
+    # `the_end_access` 是 `once`（进一次末地，打几场都在里面），见 `Construct.once_inputs`。
+    Construct(
+        id="dragon:kill",
+        product=DRAGON_SLAIN,
+        amount=1.0,
+        inputs=((THE_END_ACCESS, 1.0),),
+        once_inputs=(THE_END_ACCESS,),
+        seconds=gamedata.DRAGON_SLAIN_SECONDS,
+        label=(
+            "进末地摆 4 个水晶复活、清掉柱上水晶、打死末影龙"
+            f"（实测准备 {gamedata.DRAGON_PREP_SECONDS:g} + "
+            f"龙战 {gamedata.DRAGON_FIGHT_SECONDS:g} 秒）"
+        ),
+        source="game_rule",
+    ),
+    # 龙蛋：末影龙死后在返回传送门上方生成，**不是掉落物**。所以成本 = 前面
+    # 那场龙战 + 把蛋取走（破蛋 + 拾取，实测 23.1 s）。
+    #
+    # 23.1 s 的窗口本身已含「破蛋 + 拾取」，不再叠加 `PLACE_SECONDS`。
     Construct(
         id="dragon:egg",
         product=DRAGON_EGG,
         amount=1.0,
-        inputs=((THE_END_ACCESS, 1.0),),
-        seconds=gamedata.DRAGON_FIGHT_SECONDS + gamedata.PLACE_SECONDS,
-        label="进末地打赢一场末影龙（实测约 6 分钟），龙死后返回传送门上方生成龙蛋，取走",
+        inputs=((DRAGON_SLAIN, 1.0),),
+        once_inputs=(DRAGON_SLAIN,),
+        seconds=gamedata.DRAGON_EGG_SECONDS,
+        label="龙死后在返回传送门上方生成龙蛋，破蛋并取走（实测约 23 秒）",
         source="game_rule",
     ),
     # 龙息不需要打末影龙：等它喷一轮，拿瓶子接就行。所以成本几乎等于
@@ -315,24 +348,24 @@ END_CONSTRUCTS: tuple[Construct, ...] = (
     ),
     # 到达外岛（末地城）的两条路。模型对同一产物取小，两条都建，不手工挑便宜的。
     #
-    # 路径 1：打完龙走折跃门。折跃门在龙死后生成于主岛边缘，**必须扔末影珍珠
-    # 穿过去**（走进去不传送）。代价 = 一场龙战 + 走到门 + 一颗珍珠。
+    # 路径 1：打完龙走折跃门。折跃门在龙死后生成于主岛边缘，代价 = 打死龙
+    # （与龙蛋共用 `dragon:kill`）+ 走到门 + 穿过去。
     #
-    # `DRAGON_FIGHT_SECONDS` 的窗口里含两段只属于测量场景的时间（摆 4 个水晶 +
-    # 复活读秒 25.5 s、龙死→糘蛋 23.1 s），这里**不扣**：真实进末地时玩家落在
-    # 离主岛约 100 格的黑曜石平台上，走到龙面前那一段本身就是同样量级的开销，
-    # 两边相抵。为只去外岛的人再抠那 23 秒，精度还不如“落地位置”本身的随机性。
+    # **不消耗末影珍珠**：门是个 1 格高的方块，走进去就传送。够不到时压身位
+    # （活板门 / 半砖）或坐船、坐矿车都能蹭过去，这些手法的差别只有几秒，
+    # 也都不要材料——按「走过去」建模，不引入一个会被无数替代方案绕开的耗材。
     #
-    # 它顺带产出龙蛋，但模型按「每件物品单独算一条路线」计价：同时要龙蛋和
-    # 鞘翅时这 365 秒会被算两次。这是已知的保守偏差——图里没有「多个物品共享
-    # 同一场战斗」的表达能力，记在 `docs/planning/todo.md` §2.9。
+    # 这里只付 `END_GATEWAY_SECONDS`（走到门 24 s + 穿门 1 s）：龙战那 341.9 s
+    # 由 `dragon:kill` 承担。也不含「破蛋 + 拾取」那 23.1 s——那是龙蛋自己的
+    # 最后一步，只为去外岛的人不必付。
     Construct(
         id="end:gateway",
         product=OUTER_END,
         amount=1.0,
-        inputs=((THE_END_ACCESS, 1.0), (ENDER_PEARL, 1.0)),
-        seconds=gamedata.DRAGON_FIGHT_SECONDS + gamedata.END_GATEWAY_SECONDS,
-        label="打完末影龙，从主岛边缘的折跃门扔末影珍珠穿到外岛",
+        inputs=((DRAGON_SLAIN, 1.0),),
+        once_inputs=(DRAGON_SLAIN,),
+        seconds=gamedata.END_GATEWAY_SECONDS,
+        label="打完末影龙（与龙蛋共用那场战斗），走到主岛边缘的折跃门穿到外岛",
         source="game_rule",
     ),
     # 路径 2：不打龙，自己搭桥横渡约 1000 格虚空。

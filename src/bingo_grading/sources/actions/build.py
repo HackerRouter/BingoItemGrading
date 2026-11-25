@@ -195,7 +195,7 @@ def _emit_construct(
             Requirement(
                 name,
                 qty,
-                MODE_PER_USE,
+                construct.mode_for(name),
                 forbid=construct.forbid_for(name),
                 forbid_needs=construct.forbid_needs_for(name),
             )
@@ -228,7 +228,7 @@ def _emit_construct(
                     Requirement(
                         n,
                         q,
-                        MODE_PER_USE,
+                        construct.mode_for(n),
                         forbid=construct.forbid_for(n),
                         forbid_needs=construct.forbid_needs_for(n),
                     )
