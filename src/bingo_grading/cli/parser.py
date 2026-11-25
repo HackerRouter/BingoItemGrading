@@ -181,11 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
             "它自己的成本已经计入，只是不再展开更下游的明细"
         ),
     )
-    plan.add_argument(
-        "--graph-legacy",
-        action="store_true",
-        help="用旧的单层节点渲染器画合成图（保留对照用）",
-    )
     plan.set_defaults(handler=cmd_plan)
 
     observe_cmd = sub.add_parser(

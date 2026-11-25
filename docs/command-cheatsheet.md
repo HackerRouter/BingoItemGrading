@@ -61,7 +61,6 @@
 | `--graph-out 路径` | 写合成图基础名：`.dot`，有 Graphviz 时再写 `.svg` 与 `.html` |
 | `--graph-paths N` | 合成图画前几条路线，默认 3 |
 | `--graph-depth N` | 合成图向下展开几层，默认 4；超出的节点画成虚线框，成本已计入 |
-| `--graph-legacy` | 用旧的单层节点渲染器画图，仅作对照 |
 | `--pack-version`、`--stats`、`--index`、`--dimension` | 同上 |
 
 ## observe
