@@ -24,7 +24,8 @@ from pathlib import Path
 from bingo_grading import paths
 from bingo_grading.plan import Action, ActionSet
 
-ACTIONS_SCHEMA = 1
+# 2: targets include craft-only items.
+ACTIONS_SCHEMA = 2
 
 # 头部里用到的键。写盘与读盘共用，避免两处各写一遍。
 _HEADER_KEYS = (
